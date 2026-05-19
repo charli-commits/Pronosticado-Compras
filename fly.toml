@@ -1,0 +1,16 @@
+[app]
+name = "odoo-purchasing-intelligence"
+primary_region = "mad"  # Madrid — más cercano a España
+
+[build]
+
+[http_service]
+internal_port = 8000
+force_https = true
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 1
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
