@@ -1,6 +1,5 @@
-[app]
-name = "odoo-purchasing-intelligence"
-primary_region = "mad"  # Madrid — más cercano a España
+app = "odoo-purchasing-intelligence"
+primary_region = "mad"
 
 [build]
 
