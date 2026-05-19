@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="es" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Odoo Purchasing Intelligence</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #030712; color: #f1f5f9; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #111827; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+    .fade { animation: fadeUp .25s ease; }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:none } }
+    .sk { background: linear-gradient(90deg,#1f2937 25%,#374151 50%,#1f2937 75%);
+          background-size:200% 100%; animation:sk 1.4s infinite; border-radius:6px; }
+    @keyframes sk { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+/* ── utils ── */
+const money = (n) => new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR',maximumFractionDigits:0}).format(n||0);
+const num   = (n,d=0) => new Intl.NumberFormat('es-ES',{minimumFractionDigits:d,maximumFractionDigits:d}).format(n||0);
+
+const STATE = {
+  draft:    { label:'Borrador',   cls:'bg-gray-600 text-gray-100' },
+  sent:     { label:'Enviada',    cls:'bg-blue-600 text-blue-100' },
+  purchase: { label:'Confirmada', cls:'bg-emerald-600 text-emerald-100' },
+  done:     { label:'Hecho',      cls:'bg-teal-700 text-teal-100' },
+  cancel:   { label:'Cancelada',  cls:'bg-red-700 text-red-100' },
+};
+const SEV = {
+  critical: { icon:'🔴', label:'Sin stock',        bar:'bg-red-500',    txt:'text-red-400'     },
+  warning:  { icon:'🟠', label:'Bajo mínimo',      bar:'bg-orange-500', txt:'text-orange-400'  },
+  info:     { icon:'🟡', label:'Cerca del mínimo', bar:'bg-yellow-400', txt:'text-yellow-400'  },
+  ok:       { icon:'🟢', label:'OK',               bar:'bg-emerald-500',txt:'text-emerald-400' },
+};
+const TREND = {
+  up:     { icon:'📈', label:'Creciente',  cls:'text-emerald-400' },
+  down:   { icon:'📉', label:'Decreciente',cls:'text-red-400'     },
+  stable: { icon:'➡️', label:'Estable',   cls:'text-blue-400'    },
+};
+const COLORS = ['#6366f1','#22d3ee','#a3e635','#f97316','#ec4899','#facc15','#34d399','#818cf8','#fb7185','#38bdf8'];
+
+/* ── API hook ── */
+function useApi(url) {
+  const [data,   setData]    = useState(null);
+  const [loading,setLoading] = useState(false);
+  const [error,  setError]   = useState(null);
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const r = await fetch(url);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || r.statusText);
+      setData(j);
+    } catch(e) { setError(e.message); }
+    finally    { setLoading(false); }
+  }, [url]);
+  useEffect(() => { load(); }, [load]);
+  return { data, loading, error, refresh: load };
+}
+
+/* ── Chart.js wrapper ── */
+function CJChart({ type, data, options, height=220 }) {
+  const ref  = useRef(null);
+  const inst = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !data) return;
+    if (inst.current) inst.current.destroy();
+    inst.current = new Chart(ref.current, { type, data, options });
+    return () => inst.current && inst.current.destroy();
+  }, [type, data, options]);
+  return <canvas ref={ref} height={height} />;
+}
+
+const baseOpts = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { labels: { color:'#9ca3af', boxWidth:12, font:{size:11} } } },
+};
+const gridColor = '#1f2937';
+const tickColor  = '#6b7280';
+const scaleOpts = (axis='y', money=false) => ({
+  grid:{ color: axis==='x' ? 'transparent' : gridColor },
+  ticks:{ color:tickColor, font:{size:10},
+    callback: money ? (v) => `€${(v/1000).toFixed(0)}k` : undefined }
+});
+
+/* ── Skeleton ── */
+const Sk = ({h='h-8',w='w-full',cls=''}) =>
+  <div className={`sk ${h} ${w} ${cls}`} />;
+
+/* ── KPI card ── */
+const KPI = ({label, value, color='indigo', loading}) => {
+  const bgs = {
+    indigo:'from-indigo-900/50 to-indigo-800/20 border-indigo-700/30',
+    cyan:  'from-cyan-900/50 to-cyan-800/20 border-cyan-700/30',
+    emerald:'from-emerald-900/50 to-emerald-800/20 border-emerald-700/30',
+    amber: 'from-amber-900/50 to-amber-800/20 border-amber-700/30',
+    rose:  'from-rose-900/50 to-rose-800/20 border-rose-700/30',
+    violet:'from-violet-900/50 to-violet-800/20 border-violet-700/30',
+  };
+  return (
+    <div className={`rounded-xl border bg-gradient-to-br p-4 ${bgs[color]}`}>
+      <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">{label}</p>
+      {loading ? <Sk h="h-7" w="w-3/4" /> : <p className="text-2xl font-bold text-white">{value}</p>}
+    </div>
+  );
+};
+
+/* ── Error banner ── */
+const Err = ({msg, onRetry}) => (
+  <div className="flex flex-col items-center justify-center gap-3 py-20 fade">
+    <span className="text-4xl">⚠️</span>
+    <p className="text-red-400 text-sm text-center max-w-md">{msg}</p>
+    {onRetry && <button onClick={onRetry} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm">Reintentar</button>}
+  </div>
+);
+
+/* ══════════════════════════════════════════════════════════════
+   DASHBOARD
+══════════════════════════════════════════════════════════════ */
+function Dashboard() {
+  const { data, loading, error, refresh } = useApi('/api/dashboard');
+
+  const trendChartData = useMemo(() => {
+    if (!data?.trend) return null;
+    return {
+      labels: data.trend.map(d => d.month),
+      datasets: [{
+        label: 'Gasto',
+        data: data.trend.map(d => d.amount),
+        borderColor: '#6366f1',
+        backgroundColor: 'rgba(99,102,241,0.15)',
+        fill: true, tension: 0.4, pointRadius: 3,
+        pointBackgroundColor: '#6366f1',
+      }]
+    };
+  }, [data]);
+
+  const trendOpts = useMemo(() => ({
+    ...baseOpts,
+    scales: { x: scaleOpts('x'), y: scaleOpts('y', true) },
+    plugins: { ...baseOpts.plugins, legend: { display: false } },
+  }), []);
+
+  const supplierChartData = useMemo(() => {
+    if (!data?.top_suppliers) return null;
+    return {
+      labels: data.top_suppliers.map(s => s.name.length > 18 ? s.name.slice(0,17)+'…' : s.name),
+      datasets: [{
+        label: 'Gasto YTD',
+        data: data.top_suppliers.map(s => s.amount),
+        backgroundColor: COLORS,
+        borderRadius: 4,
+      }]
+    };
+  }, [data]);
+
+  const supplierOpts = useMemo(() => ({
+    ...baseOpts,
+    indexAxis: 'y',
+    scales: {
+      x: { ...scaleOpts('x', true), grid:{ color: gridColor } },
+      y: { ticks:{ color:'#d1d5db', font:{size:10} }, grid:{ color:'transparent' } }
+    },
+    plugins: { ...baseOpts.plugins, legend:{ display:false } },
+  }), []);
+
+  if (error) return <Err msg={error} onRetry={refresh} />;
+
+  const k = data?.kpis || {};
+  return (
+    <div className="space-y-5 fade">
+      {/* KPIs */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <KPI label="Gasto del mes"    value={money(k.spend_month)}    color="indigo"  loading={loading} />
+        <KPI label="Gasto YTD"        value={money(k.spend_ytd)}      color="cyan"    loading={loading} />
+        <KPI label="OCs este mes"     value={num(k.orders_month)}     color="emerald" loading={loading} />
+        <KPI label="OCs borrador"     value={num(k.draft_count)}      color="amber"   loading={loading} />
+        <KPI label="OCs confirmadas"  value={num(k.confirmed_count)}  color="violet"  loading={loading} />
+        <KPI label="Bajo stock mín."  value={num(k.low_stock_count)}  color="rose"    loading={loading} />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        {/* Trend */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">Tendencia de gasto — últimos 12 meses</h3>
+          <div style={{height:220}}>
+            {loading ? <Sk h="h-full" /> : trendChartData && <CJChart type="line" data={trendChartData} options={trendOpts} height={220} />}
+          </div>
+        </div>
+        {/* Suppliers */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">Top 10 proveedores por gasto (YTD)</h3>
+          <div style={{height:220}}>
+            {loading ? <Sk h="h-full" /> : supplierChartData && <CJChart type="bar" data={supplierChartData} options={supplierOpts} height={220} />}
+          </div>
+        </div>
+      </div>
+
+      {/* Last orders */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800">
+          <h3 className="text-sm font-semibold text-gray-300">Últimas 20 órdenes de compra</h3>
+        </div>
+        {loading
+          ? <div className="p-4 space-y-2">{[...Array(5)].map((_,i)=><Sk key={i} h="h-10"/>)}</div>
+          : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-gray-500 uppercase border-b border-gray-800">
+                    <th className="px-4 py-2 text-left">Número</th>
+                    <th className="px-4 py-2 text-left">Proveedor</th>
+                    <th className="px-4 py-2 text-left">Fecha</th>
+                    <th className="px-4 py-2 text-right">Importe</th>
+                    <th className="px-4 py-2 text-center">Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data?.last_orders||[]).map(o => {
+                    const s = STATE[o.state] || { label:o.state, cls:'bg-gray-700 text-gray-300' };
+                    return (
+                      <tr key={o.id} className="border-b border-gray-800/40 hover:bg-gray-800/40">
+                        <td className="px-4 py-2.5 font-mono text-indigo-400">{o.name}</td>
+                        <td className="px-4 py-2.5 text-gray-200">{o.supplier}</td>
+                        <td className="px-4 py-2.5 text-gray-400">{o.date}</td>
+                        <td className="px-4 py-2.5 text-right font-medium text-white">{money(o.amount)}</td>
+                        <td className="px-4 py-2.5 text-center">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.cls}`}>{s.label}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   STOCK ALERTS
+══════════════════════════════════════════════════════════════ */
+function StockAlerts() {
+  const { data, loading, error, refresh } = useApi('/api/stock-alerts');
+  const [sevFilter, setSevFilter] = useState('all');
+  const [locFilter, setLocFilter] = useState('__esbo__');  // sentinel → auto-select ESBO
+  const [search, setSearch]       = useState('');
+
+  const alerts    = data?.alerts    || [];
+  const locations = data?.locations || [];
+
+  // Auto-select ESBO/Stock on first load
+  useEffect(() => {
+    if (!locations.length || locFilter !== '__esbo__') return;
+    const esbo = locations.find(l => l.name.toLowerCase().includes('esbo'));
+    setLocFilter(esbo ? String(esbo.id) : 'all');
+  }, [locations]);
+
+  const filtered = useMemo(() => {
+    return alerts.filter(item => {
+      if (sevFilter !== 'all' && item.severity !== sevFilter) return false;
+      if (locFilter !== 'all' && String(item.location_id) !== locFilter) return false;
+      if (search && !item.product.toLowerCase().includes(search.toLowerCase())) return false;
+      return true;
+    });
+  }, [alerts, sevFilter, locFilter, search]);
+
+  const counts = useMemo(() =>
+    alerts.reduce((a,i) => ({ ...a, [i.severity]:(a[i.severity]||0)+1 }), {}),
+  [alerts]);
+
+  if (error) return <Err msg={error} onRetry={refresh} />;
+
+  const activeLocName = locFilter === 'all'
+    ? 'Todas las ubicaciones'
+    : locations.find(l => String(l.id) === locFilter)?.name || '…';
+
+  return (
+    <div className="space-y-4 fade">
+      {/* Location selector */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 flex items-center gap-3 flex-wrap">
+        <span className="text-xs text-gray-400 font-medium uppercase tracking-wide">Ubicación</span>
+        <div className="flex gap-2 flex-wrap flex-1">
+          <button onClick={() => setLocFilter('all')}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors
+              ${locFilter==='all' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}>
+            Todas
+          </button>
+          {locations.map(loc => (
+            <button key={loc.id} onClick={() => setLocFilter(String(loc.id))}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors
+                ${locFilter===String(loc.id) ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}>
+              {loc.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Severity + search */}
+      <div className="flex flex-wrap gap-2 items-center">
+        {['all','critical','warning','info','ok'].map(s => {
+          const cfg = SEV[s] || { icon:'📋', label:'Todos' };
+          const count = s==='all' ? filtered.length : filtered.filter(i=>i.severity===s).length;
+          return (
+            <button key={s} onClick={() => setSevFilter(s)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors
+                ${sevFilter===s ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}>
+              {s!=='all' && cfg.icon+' '}{cfg.label||'Todos'} <span className="ml-1 opacity-60 text-xs">{count}</span>
+            </button>
+          );
+        })}
+        <input type="text" placeholder="Buscar producto…" value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="ml-auto px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200
+            placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-52" />
+      </div>
+
+      {/* Table */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between gap-2 flex-wrap">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-300">Alertas de reabastecimiento</h3>
+            <p className="text-xs text-gray-500">{activeLocName} · ordenado por ventas 12m</p>
+          </div>
+          <span className="text-xs text-gray-500">{filtered.length} productos</span>
+        </div>
+        {loading
+          ? <div className="p-4 space-y-2">{[...Array(6)].map((_,i)=><Sk key={i} h="h-12"/>)}</div>
+          : filtered.length===0
+            ? <div className="p-10 text-center text-gray-500">Sin resultados</div>
+            : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs text-gray-500 uppercase border-b border-gray-800">
+                      <th className="px-4 py-2 text-left">Producto</th>
+                      <th className="px-4 py-2 text-right">Ventas 12m ↓</th>
+                      <th className="px-4 py-2 text-right">Stock actual</th>
+                      <th className="px-4 py-2 text-right">Mínimo</th>
+                      <th className="px-4 py-2 text-right hidden lg:table-cell">Máximo</th>
+                      <th className="px-4 py-2 text-right">A pedir</th>
+                      <th className="px-4 py-2 text-center">Cobertura</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map(item => {
+                      const cfg = SEV[item.severity];
+                      return (
+                        <tr key={item.id} className="border-b border-gray-800/40 hover:bg-gray-800/30">
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <span>{cfg.icon}</span>
+                              <div>
+                                <div className="text-gray-200 font-medium">{item.product}</div>
+                                <div className="text-xs text-gray-500">{item.location}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {item.sales_12m > 0
+                              ? <span className="text-cyan-400 font-semibold">{num(item.sales_12m,1)}</span>
+                              : <span className="text-gray-600">—</span>}
+                          </td>
+                          <td className={`px-4 py-3 text-right font-bold ${cfg.txt}`}>{num(item.on_hand,2)}</td>
+                          <td className="px-4 py-3 text-right text-gray-300">{num(item.min_qty,2)}</td>
+                          <td className="px-4 py-3 text-right text-gray-400 hidden lg:table-cell">{num(item.max_qty,2)}</td>
+                          <td className="px-4 py-3 text-right text-amber-400 font-semibold">{num(item.to_order,2)}</td>
+                          <td className="px-4 py-3 w-28">
+                            <div className="text-right text-xs text-gray-400 mb-1">{num(item.coverage,1)}%</div>
+                            <div className="w-full bg-gray-700 rounded-full h-1.5">
+                              <div className={`h-1.5 rounded-full ${cfg.bar}`} style={{width:`${Math.min(item.coverage,100)}%`}} />
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Mini sparkline (SVG) ─────────────────────────────────────────────────── */
+function Spark({ data, color='#6366f1', w=80, h=28 }) {
+  if (!data || data.length < 2) return null;
+  const max = Math.max(...data, 0.01);
+  const pts = data.map((v,i) => {
+    const x = (i / (data.length-1)) * w;
+    const y = h - (v / max) * h;
+    return `${x},${y}`;
+  }).join(' ');
+  return (
+    <svg width={w} height={h} className="overflow-visible">
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   FORECAST
+══════════════════════════════════════════════════════════════ */
+function Forecast() {
+  const { data, loading, error, refresh } = useApi('/api/forecast');
+  const [refreshing, setRefreshing] = useState(false);
+  const hardRefresh = async () => {
+    setRefreshing(true);
+    await fetch('/api/forecast/refresh');
+    await refresh();
+    setRefreshing(false);
+  };
+  const [brandFilter,  setBrandFilter]  = useState(52);   // Titanium Strength default
+  const [vendorFilter, setVendorFilter] = useState('all');
+  const [search,       setSearch]       = useState('');
+  const [quantities,   setQuantities]   = useState({});
+  const [expandedPid,  setExpandedPid]  = useState(null);
+  const [chartData,    setChartData]    = useState(null);
+  const [instruction,  setInstruction]  = useState('');
+  const [instrLog,     setInstrLog]     = useState([]);
+  const [sortBy,       setSortBy]       = useState('coverage');   // 'coverage' | 'forecast'
+  const [urgencyFilter,setUrgencyFilter]= useState(null);         // null | 3 | 5 | 'no_movement'
+  const [summaryOpen,  setSummaryOpen]  = useState(false);
+  const [drafts,       setDrafts]       = useState(() => {
+    try { return JSON.parse(localStorage.getItem('opi_drafts') || '[]'); } catch { return []; }
+  });
+
+  const products = data?.products || [];
+  const brands   = data?.brands   || [];
+
+  // Vendors for the selected brand (sorted alphabetically)
+  const vendorsForBrand = useMemo(() => {
+    const byBrand = products.filter(p => brandFilter === 'all' || p.brand_id === brandFilter);
+    const seen = {};
+    byBrand.forEach(p => { if (p.vendor && p.vendor !== '—') seen[p.vendor] = true; });
+    return Object.keys(seen).sort();
+  }, [products, brandFilter]);
+
+  // Reset vendor filter when brand changes
+  const selectBrand = (bid) => { setBrandFilter(bid); setVendorFilter('all'); setExpandedPid(null); };
+
+  // Urgency counts for badge/filters (across current brand, ignoring urgencyFilter)
+  const urgentCount  = useMemo(() => products.filter(p =>
+    (brandFilter === 'all' || p.brand_id === brandFilter) &&
+    !p.no_movement && p.coverage_months < 5 && p.coverage_months > -99
+  ).length, [products, brandFilter]);
+  const criticalCount = useMemo(() => products.filter(p =>
+    (brandFilter === 'all' || p.brand_id === brandFilter) &&
+    !p.no_movement && p.coverage_months < 3 && p.coverage_months > -99
+  ).length, [products, brandFilter]);
+  const noMovementCount = useMemo(() => products.filter(p =>
+    (brandFilter === 'all' || p.brand_id === brandFilter) &&
+    (p.no_movement || p.no_recent_sales)
+  ).length, [products, brandFilter]);
+
+  const filtered = useMemo(() => {
+    let list = products.filter(p => {
+      const brandOk  = brandFilter === 'all' || p.brand_id === brandFilter;
+      const vendorOk = vendorFilter === 'all' || p.vendor === vendorFilter;
+      const searchOk = !search || p.product_name.toLowerCase().includes(search.toLowerCase());
+      if (urgencyFilter === 'no_movement') {
+        return brandOk && vendorOk && searchOk && (p.no_movement || p.no_recent_sales);
+      }
+      // Normal mode: always hide pure no_movement products (0 sales 12m)
+      if (p.no_movement) return false;
+      return brandOk && vendorOk && searchOk &&
+        (urgencyFilter === null || (p.coverage_months < urgencyFilter && p.coverage_months > -99));
+    });
+    if (sortBy === 'coverage') {
+      list = [...list].sort((a, b) => a.coverage_months - b.coverage_months);
+    }
+    if (urgencyFilter === 'no_movement') {
+      list = [...list].sort((a, b) => (b.qty_available||0) - (a.qty_available||0));
+    }
+    return list;
+  }, [products, brandFilter, vendorFilter, search, urgencyFilter, sortBy]);
+
+  // Totals for footer
+  const totalQtyToBuy   = useMemo(() => filtered.reduce((a,p) => a + (parseFloat(quantities[p.product_id])||0), 0), [filtered, quantities]);
+  const totalAmountToBuy= useMemo(() => filtered.reduce((a,p) => a + (parseFloat(quantities[p.product_id])||0)*(p.vendor_price||p.avg_price), 0), [filtered, quantities]);
+  const totalVelocity   = useMemo(() => filtered.reduce((a,p) => a + p.monthly_velocity, 0), [filtered]);
+  const totalForecast   = useMemo(() => filtered.reduce((a,p) => a + p.total_forecast_qty, 0), [filtered]);
+
+  // Resumen por fábrica — usa TODOS los productos (todas las marcas) con cantidad asignada
+  // Así al cambiar de marca el resumen global se mantiene
+  const summaryByVendor = useMemo(() => {
+    const map = {};
+    products.forEach(p => {
+      const qty = parseFloat(quantities[p.product_id]) || 0;
+      if (qty <= 0) return;
+      const vendor = p.vendor || '—';
+      const price  = p.vendor_price || p.avg_price || 0;
+      if (!map[vendor]) map[vendor] = { vendor, products: 0, units: 0, amount: 0, items: [] };
+      map[vendor].products += 1;
+      map[vendor].units    += qty;
+      map[vendor].amount   += qty * price;
+      map[vendor].items.push({
+        name: p.product_name, brand: p.brand_name, qty, price,
+        total: qty * price, code: p.vendor_code
+      });
+    });
+    return Object.values(map).sort((a, b) => b.amount - a.amount);
+  }, [products, quantities]);
+
+  // Totals across ALL brands (for the summary footer)
+  const summaryTotalUnits  = useMemo(() => summaryByVendor.reduce((a,v) => a+v.units,  0), [summaryByVendor]);
+  const summaryTotalAmount = useMemo(() => summaryByVendor.reduce((a,v) => a+v.amount, 0), [summaryByVendor]);
+
+  // Pre-fill quantities: use backend-calculated suggested_qty
+  // = max(0, 6-month sales forecast − virtual_available)
+  // Only fills products that actually need ordering (suggested_qty > 0)
+  // Draft save / load / export / import
+  const saveDraft = () => {
+    const name = window.prompt('Nombre del borrador:', `Plan ${new Date().toLocaleDateString('es-ES')}`);
+    if (!name) return;
+    const filled = Object.entries(quantities).filter(([,v]) => parseFloat(v) > 0);
+    const draft = {
+      name,
+      date: new Date().toISOString().slice(0,10),
+      quantities: Object.fromEntries(filled),
+      meta: {
+        total_units:  filled.reduce((a,[,v]) => a + parseFloat(v), 0),
+        total_amount: filled.reduce((a,[pid,v]) => {
+          const p = products.find(x => x.product_id == pid);
+          return a + parseFloat(v) * (p?.vendor_price || p?.avg_price || 0);
+        }, 0),
+        products_count: filled.length,
+      }
+    };
+    const updated = [...drafts, draft];
+    setDrafts(updated);
+    localStorage.setItem('opi_drafts', JSON.stringify(updated));
+  };
+
+  const loadDraft = (draft) => setQuantities(draft.quantities);
+
+  const deleteDraft = (idx) => {
+    if (!window.confirm('¿Eliminar este borrador?')) return;
+    const updated = drafts.filter((_,i) => i !== idx);
+    setDrafts(updated);
+    localStorage.setItem('opi_drafts', JSON.stringify(updated));
+  };
+
+  const exportDraft = (draft) => {
+    const blob = new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `${draft.name.replace(/[^a-z0-9]/gi,'_')}_${draft.date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importDraft = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const draft = JSON.parse(ev.target.result);
+        if (!draft.quantities) throw new Error('Formato inválido');
+        const updated = [...drafts, { ...draft, name: draft.name + ' (importado)', date: new Date().toISOString().slice(0,10) }];
+        setDrafts(updated);
+        localStorage.setItem('opi_drafts', JSON.stringify(updated));
+        setQuantities(draft.quantities);
+      } catch { alert('Archivo JSON inválido'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const prefillForecast = () => {
+    const upd = {};
+    filtered.forEach(p => {
+      if ((p.suggested_qty || 0) > 0) upd[p.product_id] = p.suggested_qty;
+    });
+    setQuantities(prev => ({...prev, ...upd}));
+  };
+  const clearQuantities = () => setQuantities({});
+
+  // ── Natural-language instruction parser ────────────────────────────────────
+  const applyInstruction = () => {
+    const raw = instruction.trim();
+    if (!raw) return;
+    const text = raw.toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')  // strip accents
+      .trim();
+
+    let result = { ...quantities };
+    const msgs = [];
+
+    // Helper: ensure a product has a base quantity (auto-fill if 0/empty)
+    const base = (p) => {
+      const v = parseFloat(result[p.product_id]);
+      if (v > 0) return v;
+      // auto-seed with backend suggested_qty
+      return p.suggested_qty || 0;
+    };
+
+    // ── 1. RESET / LIMPIAR ──
+    if (/^(limpiar?|borrar?|reset|reiniciar?|vaciar?|clear)/.test(text)) {
+      result = {};
+      msgs.push('✓ Cantidades limpiadas');
+    }
+
+    // ── 2. RELLENAR pronóstico desde cero ──
+    else if (/^(rellena(r)?|pronostico|calcular?|auto)/.test(text)) {
+      let filled = 0;
+      filtered.forEach(p => {
+        if ((p.suggested_qty || 0) > 0) { result[p.product_id] = p.suggested_qty; filled++; }
+      });
+      msgs.push(`✓ ${filled} productos rellenados (ventas 6m − stock disponible)`);
+    }
+
+    else {
+      let matched = false;
+
+      // ── 3. MULTIPLICAR ── "multiplica por 1.5", "x1.5", "×1.5", "*1.5", "factor 1.5"
+      const mulM = text.match(/(?:multiplica(?:\s+por)?|factor|[×x\*])\s*(\d+(?:[.,]\d+)?)/);
+      if (mulM) {
+        const f = parseFloat(mulM[1].replace(',', '.'));
+        if (!isNaN(f) && f > 0) {
+          filtered.forEach(p => { result[p.product_id] = Math.ceil(base(p) * f); });
+          msgs.push(`✓ Multiplicado por ${f}`);
+          matched = true;
+        }
+      }
+
+      // ── 4. AUMENTAR % ── "aumenta 20%", "+20%", "añade 20%", "incrementa 20%", "margen 20%"
+      const addM = text.match(/(?:aumenta(?:r)?|aniade?(?:r)?|incrementa(?:r)?|margen|\+)\s*(\d+(?:[.,]\d+)?)\s*%/);
+      if (addM) {
+        const pct = parseFloat(addM[1].replace(',', '.')) / 100;
+        if (!isNaN(pct) && pct > 0) {
+          filtered.forEach(p => { result[p.product_id] = Math.ceil(base(p) * (1 + pct)); });
+          msgs.push(`✓ Aumentado un ${Math.round(pct*100)}%`);
+          matched = true;
+        }
+      }
+
+      // ── 5. REDUCIR % ── "reduce 20%", "baja 20%", "descuenta 20%", "-20%"
+      const redM = text.match(/(?:reduce?(?:ir)?|baja(?:r)?|disminuye?(?:ir)?|descuenta?|-)\s*(\d+(?:[.,]\d+)?)\s*%/);
+      if (redM) {
+        const pct = parseFloat(redM[1].replace(',', '.')) / 100;
+        if (!isNaN(pct) && pct > 0) {
+          filtered.forEach(p => { result[p.product_id] = Math.max(0, Math.ceil(base(p) * (1 - pct))); });
+          msgs.push(`✓ Reducido un ${Math.round(pct*100)}%`);
+          matched = true;
+        }
+      }
+
+      // ── 6. MÍNIMO ── "mínimo 5", "min 5", "al menos 5"
+      const minM = text.match(/(?:minimo|min|al\s+menos)\s*(\d+)/);
+      if (minM) {
+        const minVal = parseInt(minM[1]);
+        if (!isNaN(minVal) && minVal >= 0) {
+          filtered.forEach(p => { result[p.product_id] = Math.max(base(p), minVal); });
+          msgs.push(`✓ Mínimo ${minVal} uds por producto`);
+          matched = true;
+        }
+      }
+
+      // ── 7. MÁXIMO ── "máximo 50", "max 50"
+      const maxM = text.match(/(?:maximo|max(?:imo)?)\s*(\d+)/);
+      if (maxM) {
+        const maxVal = parseInt(maxM[1]);
+        if (!isNaN(maxVal) && maxVal >= 0) {
+          filtered.forEach(p => { result[p.product_id] = Math.min(base(p), maxVal); });
+          msgs.push(`✓ Máximo ${maxVal} uds por producto`);
+          matched = true;
+        }
+      }
+
+      // ── 8. REDONDEAR A MÚLTIPLOS ── "redondea a 6", "múltiplos de 6", "cajas de 6", "packs de 12"
+      const rndM = text.match(/(?:redondea(?:\s+a)?|multiplos?\s+de|cajas?\s+de|packs?\s+de|unidades?\s+de|lotes?\s+de)\s*(\d+)/);
+      if (rndM) {
+        const mult = parseInt(rndM[1]);
+        if (!isNaN(mult) && mult > 0) {
+          filtered.forEach(p => {
+            const b = base(p);
+            result[p.product_id] = b > 0 ? Math.ceil(b / mult) * mult : 0;
+          });
+          msgs.push(`✓ Redondeado a múltiplos de ${mult}`);
+          matched = true;
+        }
+      }
+
+      // ── 9. MESES DE SEGURIDAD ── "2 meses de seguridad", "añade 1 mes de stock"
+      const msM = text.match(/(\d+(?:[.,]\d+)?)\s*meses?\s+(?:de\s+)?(?:seguridad|stock|extra|buffer)/);
+      if (msM) {
+        const months = parseFloat(msM[1].replace(',', '.'));
+        if (!isNaN(months) && months > 0) {
+          filtered.forEach(p => {
+            const monthly = p.total_forecast_qty / 3;
+            const safety  = Math.ceil(months * monthly);
+            result[p.product_id] = base(p) + safety;
+          });
+          msgs.push(`✓ Añadido ${months} mes(es) de stock de seguridad`);
+          matched = true;
+        }
+      }
+
+      // ── 10. SOLO DÉFICIT / SOLO NEGATIVOS ──
+      if (/solo\s+(?:deficit|negativos?|rotura|los\s+que\s+faltan|urgentes?)/.test(text) ||
+          /sin\s+stock/.test(text)) {
+        filtered.forEach(p => { if (p.virtual_available >= 0) delete result[p.product_id]; });
+        msgs.push('✓ Solo productos con stock negativo / déficit');
+        matched = true;
+      }
+
+      // ── 11. SUMAR CANTIDAD FIJA ── "suma 10", "añade 5 unidades"
+      const sumM = text.match(/(?:suma(?:r)?|aniade?(?:r)?|agrega(?:r)?)\s*(\d+)\s*(?:u(?:ds?|nidades?)?)?(?:\s+a\s+todo)?/);
+      if (sumM && !addM) {  // avoid conflict with % increase
+        const add = parseInt(sumM[1]);
+        if (!isNaN(add) && add > 0) {
+          filtered.forEach(p => { result[p.product_id] = base(p) + add; });
+          msgs.push(`✓ Sumado ${add} uds a cada producto`);
+          matched = true;
+        }
+      }
+
+      if (!matched) {
+        setInstrLog(prev => [{text: raw, ok: false, msg: '❓ No entendí la instrucción'}, ...prev.slice(0,4)]);
+        setInstruction('');
+        return;
+      }
+    }
+
+    setQuantities(result);
+    setInstrLog(prev => [{text: raw, ok: true, msg: msgs.join(' · ')}, ...prev.slice(0,4)]);
+    setInstruction('');
+  };
+
+  // Toggle chart for a row
+  const toggleChart = (p) => {
+    if (expandedPid === p.product_id) { setExpandedPid(null); return; }
+    setExpandedPid(p.product_id);
+    const hist = p.history || [];
+    const fore = p.forecast || [];
+    setChartData({
+      product: p,
+      data: {
+        labels: [...hist.map(h=>h.month), ...fore.map(f=>f.month)],
+        datasets: [
+          { type:'bar', label:'Ventas reales',
+            data:[...hist.map(h=>h.qty), ...fore.map(()=>null)],
+            backgroundColor:'rgba(99,102,241,0.45)', borderColor:'#6366f1', borderWidth:1 },
+          { type:'line', label:'Pronóstico 6m',
+            data:[...hist.map(()=>null), ...fore.map(f=>f.qty)],
+            borderColor:'#22d3ee', backgroundColor:'rgba(34,211,238,0.1)',
+            fill:true, tension:0.4, borderDash:[5,4], pointRadius:5, pointBackgroundColor:'#22d3ee' },
+        ]
+      }
+    });
+  };
+
+  const chartOpts = useMemo(() => ({
+    ...baseOpts,
+    scales: { x: scaleOpts('x'), y: scaleOpts('y') },
+    plugins: { ...baseOpts.plugins },
+  }), []);
+
+  // Excel export
+  const exportExcel = () => {
+    const XLSX = window.XLSX;
+    if (!XLSX) return alert('SheetJS no cargado');
+    const brand = brands.find(b=>b.id===brandFilter);
+    const rows = [
+      ['Producto','SKU Antiguo','Fabricante','Proveedor','Cód. Proveedor',
+       'Stock Actual','+ Entradas pendientes','− Salidas confirmadas','= Stock Previsto',
+       'Venta/mes (uds)','Cobertura (meses)','Pron. 6m (uds ventas)',
+       'Pron. M1','Pron. M2','Pron. M3','Pron. M4','Pron. M5','Pron. M6',
+       'Cant. sugerida','Cantidad a comprar','Precio unit.','Total compra','Tendencia'],
+    ];
+    filtered.forEach(p => {
+      const qty = parseFloat(quantities[p.product_id])||0;
+      const cov = p.coverage_months >= 99 ? '' : p.coverage_months;
+      rows.push([
+        p.product_name, p.old_sku||'', p.brand_name, p.vendor, p.vendor_code,
+        p.qty_available, p.incoming_qty, p.outgoing_qty, p.virtual_available,
+        p.monthly_velocity, cov, p.total_forecast_qty,
+        p.forecast[0]?.qty||0, p.forecast[1]?.qty||0, p.forecast[2]?.qty||0,
+        p.forecast[3]?.qty||0, p.forecast[4]?.qty||0, p.forecast[5]?.qty||0,
+        p.suggested_qty||0, qty, p.vendor_price||p.avg_price, qty*(p.vendor_price||p.avg_price),
+        TREND[p.trend]?.label||p.trend,
+      ]);
+    });
+    // Totals row
+    rows.push(['TOTAL','','','','','','','','',num(totalVelocity,1),'',num(totalForecast,0),
+               '','','','','','','',totalQtyToBuy,'',totalAmountToBuy,'']);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    // Column widths
+    ws['!cols'] = [40,16,18,30,14,10,12,12,12,10,10,12,9,9,9,9,9,9,12,14,12,14,10].map(w=>({wch:w}));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, brand?.name||'Compras');
+    XLSX.writeFile(wb, `compras_${brand?.name||'todos'}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  };
+
+  if (error) return <Err msg={error} onRetry={refresh} />;
+
+  return (
+    <div className="fade space-y-3">
+
+      {/* ── Brand filter + actions ── */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 flex items-center gap-3 flex-wrap">
+        <span className="text-xs text-gray-400 font-medium uppercase tracking-wide">Fabricante</span>
+        <div className="flex flex-col gap-2 flex-1">
+          {/* Row 1: marcas */}
+          <div className="flex gap-2 flex-wrap items-center">
+            <span className="text-xs text-gray-500 uppercase tracking-wide w-16 shrink-0">Marca</span>
+            {brands.map(b=>(
+              <button key={b.id} onClick={()=>selectBrand(b.id)}
+                className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors
+                  ${brandFilter===b.id ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-900/50'
+                    : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}>
+                {b.name}
+              </button>
+            ))}
+          </div>
+          {/* Row 2: fábricas vinculadas (proveedores reales del historial de compras) */}
+          {vendorsForBrand.length > 0 && (
+            <div className="flex gap-2 flex-wrap items-center">
+              <span className="text-xs text-gray-500 uppercase tracking-wide w-16 shrink-0">Fábrica</span>
+              <button onClick={()=>setVendorFilter('all')}
+                className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors
+                  ${vendorFilter==='all' ? 'bg-violet-700 border-violet-500 text-white' : 'bg-gray-800/60 border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
+                Todas ({vendorsForBrand.length})
+              </button>
+              {vendorsForBrand.map(v=>(
+                <button key={v} onClick={()=>setVendorFilter(v)}
+                  className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors
+                    ${vendorFilter===v ? 'bg-violet-700 border-violet-500 text-white' : 'bg-gray-800/60 border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
+                  {v.length > 35 ? v.slice(0,33)+'…' : v}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <button onClick={prefillForecast}
+            title="Cant. compra = Déficit de stock (si Previsto < 0) + Demanda estimada 3 meses"
+            className="px-3 py-1.5 rounded-lg text-xs bg-indigo-700 hover:bg-indigo-600 text-white border border-indigo-600 transition-colors">
+            ✨ Rellenar pronóstico
+          </button>
+          <button onClick={clearQuantities}
+            className="px-3 py-1.5 rounded-lg text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 border border-gray-600 transition-colors">
+            Limpiar cantidades
+          </button>
+          <button onClick={saveDraft} disabled={Object.keys(quantities).length === 0}
+            title="Guardar plan de compra como borrador (localStorage)"
+            className="px-3 py-1.5 rounded-lg text-xs bg-violet-700 hover:bg-violet-600 disabled:opacity-40 disabled:cursor-not-allowed text-white border border-violet-600 transition-colors">
+            💾 Guardar
+          </button>
+          <div className="relative group">
+            <button className="px-3 py-1.5 rounded-lg text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 border border-gray-600 transition-colors">
+              📂{drafts.length > 0 ? ` ${drafts.length}` : ''}
+            </button>
+            <div className="absolute right-0 top-full mt-1 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl z-30 min-w-64 hidden group-hover:block">
+              <div className="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
+                <p className="text-xs text-gray-500 font-medium">Borradores</p>
+                <label className="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">
+                  ⬆ Importar JSON
+                  <input type="file" accept=".json" className="hidden" onChange={importDraft} />
+                </label>
+              </div>
+              {drafts.length === 0 && (
+                <p className="px-3 py-3 text-xs text-gray-600 text-center">Sin borradores guardados</p>
+              )}
+              {drafts.map((d, i) => (
+                <div key={i} className="border-b border-gray-700/50 last:border-0 hover:bg-gray-700/40 last:rounded-b-xl">
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    <button onClick={() => loadDraft(d)} className="flex-1 text-left min-w-0">
+                      <p className="text-xs text-gray-200 font-medium truncate">{d.name}</p>
+                      <p className="text-xs text-gray-500">
+                        {d.date}
+                        {d.meta && ` · ${d.meta.products_count} refs · ${money(d.meta.total_amount)}`}
+                      </p>
+                    </button>
+                    <button onClick={() => exportDraft(d)} title="Descargar como JSON"
+                      className="text-gray-600 hover:text-indigo-400 text-xs px-1 shrink-0">⬇</button>
+                    <button onClick={() => deleteDraft(i)} title="Eliminar borrador"
+                      className="text-gray-600 hover:text-red-400 text-xs px-1 shrink-0">✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <button onClick={exportExcel}
+            className="px-3 py-1.5 rounded-lg text-xs bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-600 transition-colors flex items-center gap-1">
+            📥 Exportar Excel
+          </button>
+          <button onClick={hardRefresh} disabled={refreshing}
+            title="Forzar recarga de datos desde Odoo (ignora caché)"
+            className="px-2.5 py-1.5 rounded-lg text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-300 border border-gray-600 transition-colors">
+            {refreshing ? '⏳' : '🔄'}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Urgency filters + sort ── */}
+      {!loading && products.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-gray-500 font-medium uppercase tracking-wide">Urgencia</span>
+          {[
+            { val: null,          label: 'Todos',          count: products.filter(p => (brandFilter==='all'||p.brand_id===brandFilter) && !p.no_movement).length, cls: 'border-gray-700 text-gray-400 hover:bg-gray-800' },
+            { val: 5,             label: '⚠️ Urgente <5m', count: urgentCount,      cls: 'border-orange-700/60 text-orange-300 hover:bg-orange-900/30' },
+            { val: 3,             label: '🔴 Crítico <3m', count: criticalCount,    cls: 'border-red-700/60 text-red-300 hover:bg-red-900/30' },
+            { val: 'no_movement', label: '🚫 Sin venta',   count: noMovementCount,  cls: 'border-purple-700/60 text-purple-300 hover:bg-purple-900/30' },
+          ].map(({ val, label, count, cls }) => (
+            <button key={String(val)} onClick={() => setUrgencyFilter(val)}
+              className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors
+                ${urgencyFilter===val ? 'bg-indigo-600 border-indigo-500 text-white' : `bg-transparent ${cls}`}`}>
+              {label} <span className="ml-1 opacity-60">{count}</span>
+            </button>
+          ))}
+          <div className="ml-auto flex items-center gap-1.5 text-xs text-gray-500">
+            <span>Ordenar:</span>
+            <button onClick={() => setSortBy('coverage')}
+              className={`px-2.5 py-1 rounded-lg border transition-colors
+                ${sortBy==='coverage' ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-gray-700 text-gray-400 hover:bg-gray-800'}`}>
+              Cobertura ↑
+            </button>
+            <button onClick={() => setSortBy('forecast')}
+              className={`px-2.5 py-1 rounded-lg border transition-colors
+                ${sortBy==='forecast' ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-gray-700 text-gray-400 hover:bg-gray-800'}`}>
+              Volumen ↓
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Search + forecast note ── */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <input type="text" placeholder="Buscar producto…" value={search}
+          onChange={e=>setSearch(e.target.value)}
+          className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200
+            placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-64" />
+        <span className="text-xs text-gray-500">{filtered.length} productos</span>
+        <span className="text-xs text-gray-600 border border-gray-700 rounded-lg px-2 py-1"
+          title="Pronóstico basado en historial de VENTAS (sale.order) de los últimos 12 meses. Horizonte 6 meses = lead time del contenedor. Cant. sugerida = ventas proyectadas 6m − stock disponible (incluyendo entradas pendientes).">
+          📦 Pron. 6m = ventas estimadas · horizonte <span className="text-indigo-400">lead time contenedor</span>
+        </span>
+        {!loading && data && (
+          <span className="text-xs text-gray-600 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500/60 inline-block"></span>
+            caché 5min · <button onClick={hardRefresh} className="text-indigo-500 hover:text-indigo-400 underline">actualizar</button>
+          </span>
+        )}
+        {totalQtyToBuy > 0 && (
+          <div className="ml-auto bg-emerald-900/30 border border-emerald-800/50 rounded-lg px-3 py-1.5 flex items-center gap-3 text-sm">
+            <span className="text-gray-400">A comprar: <span className="text-white font-bold">{num(totalQtyToBuy,0)} uds</span></span>
+            <span className="text-gray-400">Total: <span className="text-emerald-400 font-bold">{money(totalAmountToBuy)}</span></span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Instruction panel ── */}
+      <div className="bg-gray-900/70 border border-indigo-900/50 rounded-xl p-3 space-y-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-indigo-400 text-sm shrink-0 font-semibold">🤖 Ajustar cantidades</span>
+          <input
+            type="text"
+            value={instruction}
+            onChange={e => setInstruction(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && applyInstruction()}
+            placeholder='Ej: "aumenta 20%"  ·  "redondea a 6"  ·  "mínimo 5"  ·  "solo déficit"  ·  "2 meses de seguridad"  ·  "multiplica por 1.5"'
+            className="flex-1 min-w-0 px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200
+              placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+          />
+          <button onClick={applyInstruction}
+            disabled={!instruction.trim()}
+            className="px-4 py-1.5 rounded-lg text-sm bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed
+              text-white border border-indigo-600 transition-colors shrink-0 font-medium">
+            Aplicar ↵
+          </button>
+        </div>
+        {/* Log of last applied instructions */}
+        {instrLog.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {instrLog.map((entry, i) => (
+              <span key={i} className={`text-xs px-2 py-0.5 rounded-full border
+                ${entry.ok
+                  ? 'bg-indigo-950/60 border-indigo-800/60 text-indigo-300'
+                  : 'bg-red-950/60 border-red-800/60 text-red-400'}`}>
+                {entry.ok ? '✓' : '✗'} {entry.text}
+                {entry.ok && <span className="ml-1 text-indigo-500">— {entry.msg.replace('✓ ','')}</span>}
+              </span>
+            ))}
+          </div>
+        )}
+        {/* Clickable command suggestions */}
+        <div className="flex flex-wrap gap-1.5 pt-0.5">
+          {[
+            { label:'✨ Rellena',            cmd:'rellena',                  desc:'Calcular desde cero (déficit + pronóstico)',   color:'indigo' },
+            { label:'📈 Aumenta 20%',        cmd:'aumenta 20%',              desc:'Subir todas las cantidades un 20%',            color:'emerald' },
+            { label:'📉 Reduce 10%',         cmd:'reduce 10%',               desc:'Bajar todas las cantidades un 10%',            color:'rose' },
+            { label:'✖️ ×1.5',              cmd:'multiplica por 1.5',       desc:'Multiplicar cada cantidad por 1.5',            color:'violet' },
+            { label:'📦 Cajas de 6',         cmd:'cajas de 6',               desc:'Redondear al múltiplo de 6 más cercano',       color:'amber' },
+            { label:'⬇️ Mínimo 5',          cmd:'mínimo 5',                 desc:'Al menos 5 uds por producto',                  color:'cyan' },
+            { label:'⬆️ Máximo 100',        cmd:'máximo 100',               desc:'Limitar a 100 uds por producto',               color:'cyan' },
+            { label:'🛡️ +2 meses seguridad',cmd:'2 meses de seguridad',     desc:'Añadir 2 meses de demanda extra como buffer',  color:'teal' },
+            { label:'🔴 Solo déficit',       cmd:'solo déficit',             desc:'Dejar solo los productos con stock negativo',  color:'red' },
+            { label:'🗑️ Limpiar',           cmd:'limpiar',                  desc:'Borrar todas las cantidades',                  color:'gray' },
+          ].map(({ label, cmd, desc, color }) => {
+            const cls = {
+              indigo: 'border-indigo-800/60 text-indigo-300 hover:bg-indigo-900/60',
+              emerald:'border-emerald-800/60 text-emerald-300 hover:bg-emerald-900/60',
+              rose:   'border-rose-800/60 text-rose-300 hover:bg-rose-900/60',
+              violet: 'border-violet-800/60 text-violet-300 hover:bg-violet-900/60',
+              amber:  'border-amber-800/60 text-amber-300 hover:bg-amber-900/60',
+              cyan:   'border-cyan-800/60 text-cyan-300 hover:bg-cyan-900/60',
+              teal:   'border-teal-800/60 text-teal-300 hover:bg-teal-900/60',
+              red:    'border-red-800/60 text-red-300 hover:bg-red-900/60',
+              gray:   'border-gray-700/60 text-gray-400 hover:bg-gray-800/60',
+            }[color];
+            return (
+              <button
+                key={cmd}
+                title={desc}
+                onClick={() => { setInstruction(cmd); }}
+                className={`px-2.5 py-1 rounded-full text-xs border bg-transparent transition-colors cursor-pointer ${cls}`}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Main table ── */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        {loading ? (
+          <div className="p-4 space-y-2">{[...Array(8)].map((_,i)=><Sk key={i} h="h-12"/>)}</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-gray-500 uppercase border-b border-gray-800 bg-gray-900/80">
+                  <th className="px-3 py-2.5 text-left sticky left-0 bg-gray-900 z-10">Producto</th>
+                  <th className="px-3 py-2.5 text-right" title="Unidades físicas en almacén ahora mismo">Stock Actual</th>
+                  <th className="px-3 py-2.5 text-right text-cyan-500" title="OCs confirmadas pendientes de recibir">+ Entradas</th>
+                  <th className="px-3 py-2.5 text-right text-orange-500" title="Pedidos de venta confirmados pendientes de servir">− Salidas</th>
+                  <th className="px-3 py-2.5 text-right text-emerald-500" title="Stock Actual + Entradas − Salidas = lo que tendrás disponible">= Previsto</th>
+                  <th className="px-3 py-2.5 text-right text-indigo-400" title="Tendencia de ventas (suavizado exponencial sobre historial de ventas)">Histórico</th>
+                  <th className="px-3 py-2.5 text-right text-indigo-400" title="Unidades vendidas por mes de media (últimos 3 meses)">Venta/mes</th>
+                  <th className="px-3 py-2.5 text-right text-indigo-400" title="Ventas proyectadas en los próximos 6 meses (lead time contenedor)">Pron. 6m</th>
+                  <th className="px-3 py-2.5 text-center" title="Meses de cobertura = stock previsto ÷ ventas mensuales. Rojo &lt;3m, Naranja 3-5m, Verde &gt;5m">Cobertura</th>
+                  <th className="px-3 py-2.5 text-center" title="Tendencia de ventas (últimos 6 meses)">Tend.</th>
+                  <th className="px-3 py-2.5 text-right" title="Precio del proveedor preferido">Precio</th>
+                  <th className="px-3 py-2.5 text-center text-emerald-400 w-28">Cant. compra</th>
+                  <th className="px-3 py-2.5 text-right text-emerald-400">Total</th>
+                  <th className="px-3 py-2.5 text-center w-8"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(p => {
+                  const tc2     = TREND[p.trend];
+                  const isExp   = expandedPid === p.product_id;
+                  const qty     = quantities[p.product_id] ?? '';
+                  const price   = p.vendor_price || p.avg_price || 0;
+                  const total   = (parseFloat(qty)||0) * price;
+                  const qtyNum  = parseFloat(qty)||0;
+
+                  // Stock real color
+                  const stockCls = p.qty_available <= 0 ? 'text-red-400 font-bold'
+                    : p.qty_available < 3 ? 'text-orange-400 font-semibold'
+                    : 'text-gray-200';
+
+                  return (
+                    <React.Fragment key={p.product_id}>
+                      <tr className={`border-b border-gray-800/40 hover:bg-gray-800/30 transition-colors ${isExp ? 'bg-indigo-950/30' : ''}`}>
+                        <td className="px-3 py-2.5 sticky left-0 bg-gray-900 z-10 min-w-0" style={{maxWidth:260}}>
+                          <div className="truncate text-gray-200 font-medium text-xs">{p.product_name}</div>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <span className={`text-xs ${tc2?.cls}`}>{tc2?.icon}</span>
+                            {p.vendor_code && <span className="text-xs text-gray-600 font-mono">{p.vendor_code}</span>}
+                          </div>
+                        </td>
+                        {/* Stock Actual */}
+                        <td className={`px-3 py-2.5 text-right text-xs font-semibold ${stockCls}`}>{num(p.qty_available,0)}</td>
+                        {/* + Entradas */}
+                        <td className="px-3 py-2.5 text-right text-xs text-cyan-400">{p.incoming_qty > 0 ? '+'+num(p.incoming_qty,0) : <span className="text-gray-600">—</span>}</td>
+                        {/* − Salidas */}
+                        <td className="px-3 py-2.5 text-right text-xs text-orange-400">{p.outgoing_qty > 0 ? '−'+num(p.outgoing_qty,0) : <span className="text-gray-600">—</span>}</td>
+                        {/* = Previsto */}
+                        <td className={`px-3 py-2.5 text-right text-xs font-semibold ${p.virtual_available < 0 ? 'text-red-400' : 'text-emerald-400'}`}>{num(p.virtual_available,0)}</td>
+                        {/* Histórico sparkline */}
+                        <td className="px-3 py-2.5 text-right">
+                          <Spark data={(p.history||[]).map(h=>h.qty)} color="#6366f1" />
+                        </td>
+                        {/* Venta/mes */}
+                        <td className="px-3 py-2.5 text-right text-xs text-indigo-300 font-semibold">
+                          {num(p.monthly_velocity,1)}
+                        </td>
+                        {/* Pron. 6m total */}
+                        <td className="px-3 py-2.5 text-right text-xs text-indigo-300 font-semibold">
+                          {num(p.total_forecast_qty,0)}
+                        </td>
+                        {/* Cobertura con semáforo */}
+                        <td className="px-3 py-2.5 text-center">
+                          {(() => {
+                            const cm = p.coverage_months;
+                            if (cm >= 99) return <span className="text-xs text-gray-600">—</span>;
+                            const cls = cm < 3 ? 'text-red-400 font-bold' : cm < 5 ? 'text-orange-400 font-semibold' : 'text-emerald-400';
+                            const icon = cm < 3 ? '🔴' : cm < 5 ? '🟠' : '🟢';
+                            return <span className={`text-xs ${cls}`}>{icon} {num(cm,1)}m</span>;
+                          })()}
+                        </td>
+                        {/* Tendencia */}
+                        <td className="px-3 py-2.5 text-center">
+                          {p.no_movement
+                            ? <span className="text-xs text-purple-500" title="Sin ventas en 12 meses">🚫</span>
+                            : <span className={`text-xs ${TREND[p.trend]?.cls}`} title={TREND[p.trend]?.label}>{TREND[p.trend]?.icon}</span>
+                          }
+                        </td>
+                        <td className="px-3 py-2.5 text-right text-xs text-gray-400">{money(price)}</td>
+                        <td className="px-3 py-2.5 text-center">
+                          <input
+                            type="number" min="0" step="1"
+                            value={qty}
+                            onChange={e => setQuantities(prev => ({...prev, [p.product_id]: e.target.value}))}
+                            placeholder="0"
+                            className={`w-20 px-2 py-1 rounded-lg text-sm text-center border transition-colors
+                              bg-gray-800 focus:outline-none focus:border-emerald-500
+                              ${qtyNum > 0 ? 'border-emerald-600 text-emerald-300 font-semibold' : 'border-gray-600 text-gray-300'}`}
+                          />
+                        </td>
+                        <td className={`px-3 py-2.5 text-right text-xs font-semibold ${total > 0 ? 'text-emerald-400' : 'text-gray-600'}`}>
+                          {total > 0 ? money(total) : '—'}
+                        </td>
+                        <td className="px-3 py-2.5 text-center">
+                          <button onClick={()=>toggleChart(p)}
+                            className={`text-xs px-1.5 py-0.5 rounded transition-colors ${isExp ? 'text-indigo-400 bg-indigo-900/40' : 'text-gray-600 hover:text-gray-400'}`}
+                            title="Ver gráfica">
+                            {isExp ? '▲' : '▼'}
+                          </button>
+                        </td>
+                      </tr>
+
+                      {/* Expanded chart row */}
+                      {isExp && chartData && (
+                        <tr className="border-b border-gray-700 bg-indigo-950/20">
+                          <td colSpan="13" className="px-4 py-4">
+                            <div className="flex gap-6 items-start">
+                              <div className="flex-1" style={{height:190}}>
+                                <CJChart type="bar" data={chartData.data} options={chartOpts} height={190}/>
+                              </div>
+                              {/* Stats sidebar */}
+                              <div className="shrink-0 grid grid-cols-2 gap-x-6 gap-y-3 text-xs w-72">
+                                {[
+                                  { label:'Ventas 12m', val: num((p.history||[]).reduce((a,h)=>a+h.qty,0),0)+' uds' },
+                                  { label:'Mes pico', val: (() => { const mx=(p.history||[]).reduce((a,h)=>h.qty>a.qty?h:a,{qty:0,month:'—'}); return `${mx.month} (${num(mx.qty,0)})` })() },
+                                  { label:'Vel. media', val: num(p.monthly_velocity,1)+' uds/mes', cls:'text-indigo-300' },
+                                  { label:'Pron. 6m', val: num(p.total_forecast_qty,0)+' uds', cls:'text-cyan-300' },
+                                  { label:'Cobertura', val: p.coverage_months>=99 ? '—' : num(p.coverage_months,1)+'m',
+                                    cls: p.coverage_months<3?'text-red-400':p.coverage_months<5?'text-orange-400':'text-emerald-400' },
+                                  { label:'Tendencia', val: (TREND[p.trend]?.icon||'')+' '+(TREND[p.trend]?.label||p.trend), cls: TREND[p.trend]?.cls },
+                                  { label:'Proveedor', val: p.vendor, cls:'text-gray-200 col-span-2 truncate' },
+                                  { label:'Precio unit.', val: money(price), cls:'text-white font-bold' },
+                                  { label:'Próx. salidas', val: num(p.outgoing_qty,0)+' uds', cls:'text-orange-400' },
+                                  { label:'Sin venta reciente', val: p.no_recent_sales?'Sí (>3m)':'No', cls: p.no_recent_sales?'text-yellow-400':'text-emerald-400' },
+                                ].map(({label,val,cls=''}) => (
+                                  <div key={label} className={cls.includes('col-span-2') ? 'col-span-2' : ''}>
+                                    <p className="text-gray-600 uppercase tracking-wide" style={{fontSize:9}}>{label}</p>
+                                    <p className={`font-semibold truncate ${cls || 'text-gray-300'}`}>{val}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+              {/* Footer totals */}
+              <tfoot className="border-t-2 border-gray-700 bg-gray-900/80">
+                <tr>
+                  <td className="px-3 py-2.5 text-xs font-bold text-gray-300 sticky left-0 bg-gray-900">TOTAL ({filtered.length} productos)</td>
+                  <td colSpan="3"></td>
+                  <td className="px-3 py-2.5 text-right text-xs text-indigo-400"></td>
+                  <td className="px-3 py-2.5 text-right text-xs text-indigo-300 font-semibold">{num(totalVelocity,1)}<span className="text-gray-600 ml-0.5">u/m</span></td>
+                  <td className="px-3 py-2.5 text-right text-xs text-indigo-300 font-semibold">{num(totalForecast,0)}</td>
+                  <td colSpan="2"></td>
+                  <td className="px-3 py-2.5 text-center text-xs text-emerald-300 font-bold">{num(totalQtyToBuy,0)} uds</td>
+                  <td className="px-3 py-2.5 text-right text-xs text-emerald-400 font-bold">{money(totalAmountToBuy)}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Spacer so content doesn't hide behind floating summary */}
+      {summaryByVendor.length > 0 && <div style={{height: summaryOpen ? 360 : 56}} />}
+
+      {/* ── Floating sticky summary bar ── */}
+      {summaryByVendor.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-gray-700/80 shadow-2xl fade"
+             style={{background:'#0f172a'}}>
+
+          {/* Expanded vendor list */}
+          {summaryOpen && (
+            <div className="max-h-72 overflow-y-auto border-b border-gray-800 divide-y divide-gray-800/60">
+              {summaryByVendor.map(v => (
+                <VendorSummaryRow key={v.vendor} row={v} totalAmount={summaryTotalAmount} />
+              ))}
+            </div>
+          )}
+
+          {/* Always-visible header bar */}
+          <button onClick={() => setSummaryOpen(o => !o)}
+            className="w-full px-5 py-3 flex items-center justify-between hover:bg-gray-800/40 transition-colors">
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-semibold text-gray-200">🏭 Resumen por fábrica</span>
+              <span className="text-xs text-gray-500">
+                {summaryByVendor.length} fábrica{summaryByVendor.length>1?'s':''} · {num(summaryTotalUnits,0)} uds
+              </span>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className="text-base font-bold text-emerald-400">{money(summaryTotalAmount)}</span>
+              <span className="text-gray-500 text-xs">{summaryOpen ? '▼' : '▲'}</span>
+            </div>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Vendor summary row (collapsible) ─────────────────────── */
+function VendorSummaryRow({ row, totalAmount }) {
+  const [open, setOpen] = useState(false);
+  const pct = totalAmount > 0 ? (row.amount / totalAmount) * 100 : 0;
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full px-4 py-3 flex items-center gap-4 hover:bg-gray-800/40 transition-colors text-left">
+        {/* Vendor name */}
+        <span className="text-sm font-medium text-gray-200 w-64 shrink-0 truncate">{row.vendor}</span>
+        {/* Bar */}
+        <div className="flex-1 flex items-center gap-2">
+          <div className="flex-1 bg-gray-800 rounded-full h-1.5 max-w-48">
+            <div className="h-1.5 rounded-full bg-indigo-500" style={{width:`${Math.min(pct,100)}%`}} />
+          </div>
+          <span className="text-xs text-gray-500 w-10 text-right">{pct.toFixed(0)}%</span>
+        </div>
+        {/* Counts */}
+        <span className="text-xs text-gray-500 w-24 text-right">{row.products} producto{row.products>1?'s':''}</span>
+        <span className="text-xs text-gray-400 w-20 text-right">{num(row.units,0)} uds</span>
+        <span className="text-sm font-bold text-emerald-400 w-28 text-right">{money(row.amount)}</span>
+        <span className="text-gray-600 text-xs ml-1">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {/* Expanded product list */}
+      {open && (
+        <div className="bg-gray-950/50 border-t border-gray-800/40">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-600 uppercase border-b border-gray-800/40">
+                <th className="px-6 py-1.5 text-left">Producto</th>
+                <th className="px-4 py-1.5 text-right">Cód. proveedor</th>
+                <th className="px-4 py-1.5 text-right">Cant.</th>
+                <th className="px-4 py-1.5 text-right">Precio unit.</th>
+                <th className="px-4 py-1.5 text-right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {row.items.sort((a,b) => b.total - a.total).map((item, i) => (
+                <tr key={i} className="border-b border-gray-800/20 hover:bg-gray-800/20">
+                  <td className="px-6 py-2 text-gray-300 max-w-xs truncate">{item.name}</td>
+                  <td className="px-4 py-2 text-right text-gray-600 font-mono">{item.code || '—'}</td>
+                  <td className="px-4 py-2 text-right text-white font-semibold">{num(item.qty,0)}</td>
+                  <td className="px-4 py-2 text-right text-gray-400">{money(item.price)}</td>
+                  <td className="px-4 py-2 text-right text-emerald-400 font-semibold">{money(item.total)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-gray-700">
+                <td colSpan="2" className="px-6 py-2 text-gray-500 font-semibold">Subtotal {row.vendor}</td>
+                <td className="px-4 py-2 text-right text-white font-bold">{num(row.units,0)}</td>
+                <td></td>
+                <td className="px-4 py-2 text-right text-emerald-400 font-bold">{money(row.amount)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   STATUS INDICATOR
+══════════════════════════════════════════════════════════════ */
+function Status() {
+  const { data, loading } = useApi('/api/status');
+  if (loading) return <span className="text-xs text-gray-500">Conectando…</span>;
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className={`w-2 h-2 rounded-full ${data?.connected ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : 'bg-red-500'}`}/>
+      <span className={data?.connected ? 'text-emerald-400' : 'text-red-400'}>
+        {data?.connected ? `Odoo conectado · ${data.db}` : (data?.message||'Sin conexión')}
+      </span>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   APP
+══════════════════════════════════════════════════════════════ */
+const TABS = [
+  { id:'dashboard', label:'Dashboard',       icon:'📊' },
+  { id:'stock',     label:'Alertas de stock',icon:'📦' },
+  { id:'forecast',  label:'Pronóstico',       icon:'🔮' },
+];
+
+function UrgentBadge() {
+  const { data } = useApi('/api/forecast');
+  if (!data?.products) return null;
+  const n = data.products.filter(p => p.coverage_months < 5 && p.coverage_months > -99).length;
+  if (n === 0) return null;
+  return (
+    <span className="ml-1 px-1.5 py-0.5 rounded-full text-xs font-bold bg-red-600 text-white leading-none">
+      {n}
+    </span>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState('dashboard');
+  return (
+    <div className="min-h-screen flex flex-col" style={{background:'#030712'}}>
+      {/* Header */}
+      <header className="border-b border-gray-800 px-5 py-3 flex items-center justify-between sticky top-0 z-10"
+        style={{background:'#0f172a'}}>
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-lg">🛒</div>
+          <div>
+            <p className="text-sm font-bold text-white leading-tight">Odoo Purchasing Intelligence</p>
+            <p className="text-xs text-gray-500 leading-tight">v16 · Análisis de compras</p>
+          </div>
+        </div>
+        <Status />
+      </header>
+
+      {/* Tabs */}
+      <nav className="border-b border-gray-800 px-5 flex gap-1" style={{background:'#0f172a'}}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={`px-4 py-3 text-sm font-medium flex items-center gap-1.5 border-b-2 transition-colors
+              ${tab===t.id ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'}`}>
+            {t.icon} {t.label}
+            {t.id === 'forecast' && <UrgentBadge />}
+          </button>
+        ))}
+      </nav>
+
+      {/* Content */}
+      <main className="flex-1 p-4 md:p-6 overflow-auto">
+        {tab==='dashboard' && <Dashboard />}
+        {tab==='stock'     && <StockAlerts />}
+        {tab==='forecast'  && <Forecast />}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
