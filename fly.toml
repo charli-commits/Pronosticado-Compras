@@ -1,5 +1,5 @@
 app = "odoo-purchasing-intelligence"
-primary_region = "mad"
+primary_region = "ams"
 
 [build]
 
