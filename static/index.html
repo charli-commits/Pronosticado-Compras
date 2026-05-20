@@ -1083,8 +1083,11 @@ function Forecast() {
                   return (
                     <React.Fragment key={p.product_id}>
                       <tr className={`border-b border-gray-800/40 hover:bg-gray-800/30 transition-colors ${isExp ? 'bg-indigo-950/30' : ''}`}>
-                        <td className="px-3 py-2.5 sticky left-0 bg-gray-900 z-10 min-w-0" style={{maxWidth:260}}>
-                          <div className="truncate text-gray-200 font-medium text-xs">{p.product_name}</div>
+                        <td className="px-3 py-2.5 sticky left-0 bg-gray-900 z-10 min-w-0 group/name relative" style={{maxWidth:260}}>
+                          <div className="truncate text-gray-200 font-medium text-xs" title={p.product_name}>{p.product_name}</div>
+                          <div className="absolute left-0 top-full mt-1 z-50 hidden group-hover/name:block bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-xs text-gray-100 shadow-xl whitespace-normal max-w-xs pointer-events-none" style={{minWidth:200}}>
+                            {p.product_name}
+                          </div>
                           <div className="flex items-center gap-1.5 mt-0.5">
                             <span className={`text-xs ${tc2?.cls}`}>{tc2?.icon}</span>
                             {p.vendor_code && <span className="text-xs text-gray-600 font-mono">{p.vendor_code}</span>}
