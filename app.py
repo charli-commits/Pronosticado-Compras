@@ -38,6 +38,9 @@ LOCATIONS = [
     {"id": 142, "name": "ESBO/Expo Caja"},
 ]
 
+# Primary stock location for forecast calculations (ESBO/Stock only)
+STOCK_LOCATION_ID = 12
+
 FORECAST_LEAD_MONTHS   = 6    # container lead time
 FORECAST_SMOOTHING_ALPHA = 0.3  # exponential smoothing factor
 CACHE_TTL_SECONDS      = 300  # 5 minutes
@@ -264,13 +267,66 @@ def fetch_po_vendor_and_price(product_ids: list[int], since: str) -> tuple[dict,
 
 
 def fetch_stock(product_ids: list[int]) -> dict[int, dict]:
-    rows = odoo(
-        "product.product", "search_read",
-        domain=[["id", "in", product_ids]],
-        fields=["id", "qty_available", "virtual_available", "incoming_qty", "outgoing_qty"],
-        limit=len(product_ids) + 1,
+    """Returns on-hand, incoming, outgoing and virtual stock filtered to STOCK_LOCATION_ID only."""
+    move_states = ["confirmed", "assigned", "waiting", "partially_available"]
+    chunk = len(product_ids) + 1
+
+    # On-hand quantity at ESBO/Stock (stock.quant)
+    quant_rows = odoo(
+        "stock.quant", "read_group",
+        domain=[["location_id", "=", STOCK_LOCATION_ID], ["product_id", "in", product_ids]],
+        fields=["product_id", "quantity:sum"],
+        groupby=["product_id"],
+        limit=chunk,
     )
-    return {row["id"]: row for row in rows}
+    on_hand: dict[int, float] = {
+        row["product_id"][0]: row.get("quantity") or 0.0
+        for row in quant_rows if row.get("product_id")
+    }
+
+    # Incoming moves arriving TO ESBO/Stock
+    incoming_rows = odoo(
+        "stock.move", "read_group",
+        domain=[
+            ["location_dest_id", "=", STOCK_LOCATION_ID],
+            ["state", "in", move_states],
+            ["product_id", "in", product_ids],
+        ],
+        fields=["product_id", "product_qty:sum"],
+        groupby=["product_id"],
+        limit=chunk,
+    )
+    incoming: dict[int, float] = {
+        row["product_id"][0]: row.get("product_qty") or 0.0
+        for row in incoming_rows if row.get("product_id")
+    }
+
+    # Outgoing moves leaving FROM ESBO/Stock
+    outgoing_rows = odoo(
+        "stock.move", "read_group",
+        domain=[
+            ["location_id", "=", STOCK_LOCATION_ID],
+            ["state", "in", move_states],
+            ["product_id", "in", product_ids],
+        ],
+        fields=["product_id", "product_qty:sum"],
+        groupby=["product_id"],
+        limit=chunk,
+    )
+    outgoing: dict[int, float] = {
+        row["product_id"][0]: row.get("product_qty") or 0.0
+        for row in outgoing_rows if row.get("product_id")
+    }
+
+    return {
+        pid: {
+            "qty_available":     on_hand.get(pid, 0.0),
+            "incoming_qty":      incoming.get(pid, 0.0),
+            "outgoing_qty":      outgoing.get(pid, 0.0),
+            "virtual_available": on_hand.get(pid, 0.0) + incoming.get(pid, 0.0) - outgoing.get(pid, 0.0),
+        }
+        for pid in product_ids
+    }
 
 
 def fetch_supplier_info(template_ids: list[int]) -> dict[int, dict]:
