@@ -49,7 +49,7 @@ TRANSIT_FILE = os.path.join(BASE_DIR, "transit_orders.json")
 
 FORECAST_LEAD_MONTHS   = 5    # container lead time
 FORECAST_SMOOTHING_ALPHA = 0.3  # exponential smoothing factor
-CACHE_TTL_SECONDS      = 300  # 5 minutes
+CACHE_TTL_SECONDS      = 900  # 15 minutes
 
 # Read-only share link token (set VIEW_TOKEN in .env to enable)
 VIEW_TOKEN = os.getenv("VIEW_TOKEN", "")
@@ -501,12 +501,29 @@ def fetch_sales_by_product_12m(since: str) -> dict[int, float]:
 
 # ── Transit orders (local JSON file) ─────────────────────────────────────────
 
+def _sanitize_transit_orders(orders: list) -> list:
+    """Self-healing for legacy data:
+    - No containers sent → original_qty must equal qty
+    - Containers sent     → original_qty must be >= qty (can't be less than pending)
+    """
+    for order in orders:
+        has_containers = bool(order.get("containers"))
+        for line in order.get("lines") or []:
+            qty  = line.get("qty", 0)
+            orig = line.get("original_qty") or 0
+            if not has_containers:
+                line["original_qty"] = qty          # no shipments yet → original = pending
+            elif orig < qty:
+                line["original_qty"] = qty          # impossible state → fix it
+    return orders
+
+
 def read_transit() -> dict:
     if _supabase:
         try:
             rows = _supabase.table("transit_orders").select("*").execute()
             orders = sorted(rows.data or [], key=lambda o: o.get("expected_arrival") or "9999")
-            return {"orders": orders}
+            return {"orders": _sanitize_transit_orders(orders)}
         except Exception as e:
             print(f"Supabase read error: {e}")
     # Fallback to local file
@@ -514,7 +531,9 @@ def read_transit() -> dict:
         return {"orders": []}
     try:
         with open(TRANSIT_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            data["orders"] = _sanitize_transit_orders(data.get("orders", []))
+            return data
     except Exception:
         return {"orders": []}
 
@@ -919,6 +938,49 @@ def debug_missing(q: str = ""):
 
 # ── Transit order routes ──────────────────────────────────────────────────────
 
+@app.get("/api/products/transit-details")
+def products_transit_details(ids: str = ""):
+    """Return old_sku and supplier product_code for given product IDs (comma-separated)."""
+    if not ids:
+        return {}
+    try:
+        product_ids = [int(i) for i in ids.split(",") if i.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="IDs inválidos")
+
+    # old_sku from product.product
+    variants = odoo(
+        "product.product", "search_read",
+        domain=[["id", "in", product_ids]],
+        fields=["id", "old_sku", "product_tmpl_id"],
+        limit=len(product_ids) + 1,
+    )
+    tmpl_to_pid  = {}
+    result: dict = {}
+    for v in variants:
+        pid = v["id"]
+        result[pid] = {"old_sku": v.get("old_sku") or ""}
+        if v.get("product_tmpl_id"):
+            tmpl_to_pid[v["product_tmpl_id"][0]] = pid
+
+    # supplier product_code from product.supplierinfo
+    if tmpl_to_pid:
+        infos = odoo(
+            "product.supplierinfo", "search_read",
+            domain=[["product_tmpl_id", "in", list(tmpl_to_pid.keys())]],
+            fields=["product_tmpl_id", "product_code"],
+            limit=len(tmpl_to_pid) * 5,
+        )
+        for info in infos:
+            tmpl = info.get("product_tmpl_id")
+            if tmpl and info.get("product_code"):
+                pid = tmpl_to_pid.get(tmpl[0])
+                if pid and not result[pid].get("vendor_ref"):
+                    result[pid]["vendor_ref"] = info["product_code"]
+
+    return result
+
+
 @app.get("/api/transit")
 def transit_list():
     return read_transit()
@@ -941,6 +1003,8 @@ async def transit_create(request: Request):
                 "product_id":   line.get("product_id"),
                 "product_name": line.get("product_name", ""),
                 "qty":          float(line.get("qty", 0)),
+                "original_qty": float(line.get("qty", 0)),
+                "price":        float(line.get("price", 0)),
             }
             for line in body.get("lines", [])
         ],
@@ -968,6 +1032,14 @@ async def transit_update(order_id: str, request: Request):
                         "product_id":   line.get("product_id"),
                         "product_name": line.get("product_name", ""),
                         "qty":          float(line.get("qty", 0)),
+                        # original_qty = new pending qty + already sent in containers
+                        "original_qty": float(line.get("qty", 0)) + sum(
+                            sl.get("qty", 0)
+                            for c in order.get("containers", [])
+                            for sl in c.get("sent_lines", [])
+                            if sl.get("product_id") == line.get("product_id")
+                        ),
+                        "price":        float(line.get("price", 0)),
                     }
                     for line in body.get("lines", order.get("lines", []))
                 ],
@@ -996,6 +1068,298 @@ def transit_delete_line(order_id: str, line_id: str):
             break
     write_transit(data)
     return {"deleted": line_id}
+
+
+@app.patch("/api/transit/{order_id}/archive")
+async def transit_archive(order_id: str, request: Request):
+    """Archive a transit order (mark as received) with actual arrival date."""
+    body = await request.json()
+    data = read_transit()
+    for o in data["orders"]:
+        if o["id"] == order_id:
+            o["status"] = "archived"
+            o["actual_arrival"] = body.get("actual_arrival", "")
+            break
+    write_transit(data)
+    return {"archived": order_id}
+
+
+@app.patch("/api/transit/{order_id}/unarchive")
+def transit_unarchive(order_id: str):
+    """Restore an archived transit order to active."""
+    data = read_transit()
+    for o in data["orders"]:
+        if o["id"] == order_id:
+            o["status"] = "active"
+            o["actual_arrival"] = ""
+            break
+    write_transit(data)
+    return {"unarchived": order_id}
+
+
+@app.get("/api/exchange-rates")
+def exchange_rates():
+    """Return EUR→CNY and EUR→USD rates (cached 1h)."""
+    cached = cache_get("exchange_rates")
+    if cached:
+        return cached
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/EUR", timeout=5)
+        d = r.json()
+        rates = {"CNY": round(d["rates"].get("CNY", 7.8), 4),
+                 "USD": round(d["rates"].get("USD", 1.08), 4)}
+    except Exception:
+        rates = {"CNY": 7.8, "USD": 1.08}
+    cache_set("exchange_rates", rates)
+    return rates
+
+
+@app.delete("/api/transit/{order_id}/odoo-link")
+def transit_clear_all_odoo_links(order_id: str):
+    """Clear ALL odoo links and restore original quantities for all containers."""
+    data = read_transit()
+    for o in data["orders"]:
+        if o["id"] == order_id:
+            o["odoo_po"] = ""
+            o["containers"] = []
+            for line in o.get("lines", []):
+                if line.get("original_qty"):
+                    line["qty"] = line["original_qty"]
+            break
+    write_transit(data)
+    return {"cleared": order_id}
+
+
+@app.delete("/api/transit/{order_id}/odoo-link/{po_name}")
+def transit_clear_one_odoo_link(order_id: str, po_name: str):
+    """Remove one specific GCPO and restore only its sent quantities."""
+    data = read_transit()
+    for o in data["orders"]:
+        if o["id"] == order_id:
+            containers = o.get("containers") or []
+            container  = next((c for c in containers if c["po_name"] == po_name), None)
+            if container:
+                # Restore quantities for this container's lines
+                for sent in container.get("sent_lines", []):
+                    pid     = sent.get("product_id")
+                    restore = sent.get("qty", 0)
+                    for line in o.get("lines", []):
+                        if line.get("product_id") == pid:
+                            line["qty"] = round(line.get("qty", 0) + restore, 4)
+                            break
+                # Remove this container
+                o["containers"] = [c for c in containers if c["po_name"] != po_name]
+                o["odoo_po"]    = ", ".join(c["po_name"] for c in o["containers"])
+            break
+    write_transit(data)
+    return {"cleared": po_name}
+
+
+@app.post("/api/transit/{order_id}/send-to-odoo")
+async def transit_send_to_odoo(order_id: str, request: Request):
+    """Create a draft Purchase Order in Odoo from a transit order (one container)."""
+    try:
+        body = {}
+        if request.headers.get("content-type", "").startswith("application/json"):
+            body = await request.json()
+        return _do_send_to_odoo(order_id, container_lines=body.get("lines"), container_ref=body.get("container_ref", ""))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _do_send_to_odoo(order_id: str, container_lines=None, container_ref: str = ""):
+    data = read_transit()
+    order = next((o for o in data["orders"] if o["id"] == order_id), None)
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido no encontrado")
+
+    # Use custom container lines if provided, otherwise use all order lines
+    source_lines = container_lines if container_lines is not None else order.get("lines", [])
+    if not source_lines:
+        raise HTTPException(status_code=400, detail="El pedido no tiene líneas de productos")
+    # Filter out lines with qty = 0
+    source_lines = [l for l in source_lines if l.get("qty", 0) > 0]
+    if not source_lines:
+        raise HTTPException(status_code=400, detail="Ninguna línea tiene cantidad mayor que 0")
+
+    # ── Find supplier (res.partner) ──────────────────────────────────────────
+    supplier_name = order.get("supplier", "")
+    partners = odoo(
+        "res.partner", "search_read",
+        domain=[["name", "=", supplier_name], ["supplier_rank", ">", 0]],
+        fields=["id", "name"],
+        limit=5,
+    )
+    if not partners:
+        # Fallback: case-insensitive partial match
+        partners = odoo(
+            "res.partner", "search_read",
+            domain=[["name", "ilike", supplier_name]],
+            fields=["id", "name"],
+            limit=5,
+        )
+    if not partners:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Proveedor '{supplier_name}' no encontrado en Odoo",
+        )
+    partner_id = partners[0]["id"]
+
+    # ── Get purchase UOMs and vendor prices for each product ─────────────────
+    product_ids = [l["product_id"] for l in source_lines if l.get("product_id")]
+    uom_map: dict = {}
+    vendor_price_map: dict = {}
+    if product_ids:
+        prods = odoo(
+            "product.product", "search_read",
+            domain=[["id", "in", product_ids]],
+            fields=["id", "uom_po_id"],
+            limit=len(product_ids) + 1,
+        )
+        for p in prods:
+            uom_map[p["id"]] = p["uom_po_id"][0] if p.get("uom_po_id") else False
+
+        # Fetch vendor prices: supplierinfo uses product_tmpl_id, so get templates first
+        variants = odoo(
+            "product.product", "search_read",
+            domain=[["id", "in", product_ids]],
+            fields=["id", "product_tmpl_id"],
+            limit=len(product_ids) + 1,
+        )
+        tmpl_to_variant = {v["product_tmpl_id"][0]: v["id"] for v in variants if v.get("product_tmpl_id")}
+        tmpl_ids = list(tmpl_to_variant.keys())
+
+        if tmpl_ids:
+            # Fetch all supplierinfos for these templates (any partner)
+            # then prefer exact partner match, fall back to any price > 0
+            supplierinfos = odoo(
+                "product.supplierinfo", "search_read",
+                domain=[["product_tmpl_id", "in", tmpl_ids], ["price", ">", 0]],
+                fields=["product_tmpl_id", "partner_id", "price"],
+                limit=(len(tmpl_ids) + 1) * 10,
+            )
+            # First pass: exact partner match
+            for si in supplierinfos:
+                tmpl = si.get("product_tmpl_id")
+                if not tmpl:
+                    continue
+                variant_id = tmpl_to_variant.get(tmpl[0])
+                if variant_id and si.get("partner_id") and si["partner_id"][0] == partner_id:
+                    vendor_price_map[variant_id] = si["price"]
+            # Second pass: fallback for products still without price
+            for si in supplierinfos:
+                tmpl = si.get("product_tmpl_id")
+                if not tmpl:
+                    continue
+                variant_id = tmpl_to_variant.get(tmpl[0])
+                if variant_id and variant_id not in vendor_price_map:
+                    vendor_price_map[variant_id] = si["price"]
+
+    # ── Normalize dates to YYYY-MM-DD (Odoo rejects YYYY-MM) ────────────────
+    def normalize_date(d: str) -> str:
+        if not d:
+            return ""
+        d = d.strip()
+        if len(d) == 7 and d[4] == "-":   # YYYY-MM → YYYY-MM-01
+            return d + "-01"
+        return d
+
+    # ── Build order lines ────────────────────────────────────────────────────
+    arrival = normalize_date(order.get("expected_arrival") or "")
+    po_lines = []
+    for line in source_lines:
+        pid = line.get("product_id")
+        if not pid:
+            continue
+        line_vals: dict = {
+            "product_id": pid,
+            "name":        line.get("product_name", ""),
+            "product_qty": line.get("qty", 1),
+            "price_unit":  line.get("price") or vendor_price_map.get(pid, 0.0),
+        }
+        if arrival:
+            line_vals["date_planned"] = arrival
+        uom = uom_map.get(pid)
+        if uom:
+            line_vals["product_uom"] = uom
+        po_lines.append((0, 0, line_vals))
+
+    if not po_lines:
+        raise HTTPException(status_code=400, detail="Ninguna línea tiene producto válido")
+
+    # ── Get company currency ─────────────────────────────────────────────────
+    currency_id = False
+    try:
+        companies = odoo("res.company", "search_read", domain=[], fields=["currency_id"], limit=1)
+        if companies and companies[0].get("currency_id"):
+            currency_id = companies[0]["currency_id"][0]
+    except Exception:
+        pass
+
+    # ── Create draft PO ──────────────────────────────────────────────────────
+    po_vals: dict = {
+        "partner_id":  partner_id,
+        "order_line":  po_lines,
+    }
+    if currency_id:
+        po_vals["currency_id"] = currency_id
+    if order.get("order_date"):
+        po_vals["date_order"] = normalize_date(order["order_date"])
+    # Partner ref: use container_ref if provided, else order ref
+    partner_ref = container_ref or order.get("ref", "")
+    if partner_ref:
+        po_vals["partner_ref"] = partner_ref
+
+    result = odoo("purchase.order", "create", domain=[po_vals])
+
+    # create() may return a single int or a list of ints — normalise to int
+    po_id: int = result[0] if isinstance(result, list) else result
+
+    # ── Retrieve generated PO name (e.g. GCPO0020696) ────────────────────────
+    try:
+        po_records = odoo(
+            "purchase.order", "search_read",
+            domain=[["id", "=", po_id]],
+            fields=["name"],
+            limit=1,
+        )
+        po_name = po_records[0]["name"] if po_records else f"PO{po_id}"
+    except Exception:
+        po_name = f"PO{po_id}"
+
+    # ── Persist container + update order lines ───────────────────────────────
+    sent_map = {l["product_id"]: l.get("qty", 0) for l in source_lines}
+    new_container = {
+        "po_name":    po_name,
+        "sent_lines": [{"product_id": l["product_id"], "qty": l.get("qty", 0)}
+                       for l in source_lines if l.get("product_id")],
+    }
+    data2 = read_transit()
+    for o in data2["orders"]:
+        if o["id"] == order_id:
+            # Append GCPO name to odoo_po
+            existing = o.get("odoo_po", "")
+            o["odoo_po"] = (existing + ", " + po_name).strip(", ") if existing else po_name
+            # Append container detail
+            containers = o.get("containers") or []
+            containers.append(new_container)
+            o["containers"] = containers
+            # Subtract sent quantities from lines
+            new_lines = []
+            for line in o.get("lines", []):
+                pid = line.get("product_id")
+                if "original_qty" not in line or not line["original_qty"]:
+                    line = {**line, "original_qty": line.get("qty", 0)}
+                sent      = sent_map.get(pid, 0)
+                remaining = round(line.get("qty", 0) - sent, 4)
+                new_lines.append({**line, "qty": max(remaining, 0)})
+            o["lines"] = new_lines
+            break
+    write_transit(data2)
+
+    return {"po_id": po_id, "po_name": po_name}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

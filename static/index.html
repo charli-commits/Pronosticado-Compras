@@ -214,7 +214,17 @@ const Err = ({msg, onRetry}) => (
 function Dashboard() {
   const { data, loading, error, refresh } = useApi('/api/dashboard');
   const { data: forecastData } = useApi('/api/forecast');
+  const { data: transitData }  = useApi('/api/transit');
   const dark = useTheme();
+
+  const transitStats = useMemo(() => {
+    const orders = (transitData?.orders || []).filter(o => (o.status || 'active') === 'active');
+    const totalOrders = orders.length;
+    const totalContainers = orders.reduce((a, o) => a + (o.odoo_po ? o.odoo_po.split(',').filter(Boolean).length : 0), 0);
+    const today = new Date().toISOString().slice(0, 10);
+    const arrivingSoon = orders.filter(o => o.expected_arrival && o.expected_arrival <= new Date(Date.now() + 30*24*3600*1000).toISOString().slice(0,10) && o.expected_arrival >= today).length;
+    return { totalOrders, totalContainers, arrivingSoon };
+  }, [transitData]);
 
   const criticalProducts = useMemo(() => {
     if (!forecastData?.products) return [];
@@ -301,6 +311,33 @@ function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* Transit summary widget */}
+      {transitStats.totalOrders > 0 && (
+        <div className="grid grid-cols-3 gap-3">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-3">
+            <span className="text-2xl">🚢</span>
+            <div>
+              <p className="text-xs text-gray-500">Pedidos en tránsito</p>
+              <p className="text-xl font-bold text-white">{transitStats.totalOrders}</p>
+            </div>
+          </div>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-3">
+            <span className="text-2xl">📦</span>
+            <div>
+              <p className="text-xs text-gray-500">Contenedores enviados a Odoo</p>
+              <p className="text-xl font-bold text-purple-400">{transitStats.totalContainers}</p>
+            </div>
+          </div>
+          <div className={`bg-gray-900 border rounded-xl px-4 py-3 flex items-center gap-3 ${transitStats.arrivingSoon > 0 ? 'border-orange-800/60' : 'border-gray-800'}`}>
+            <span className="text-2xl">📅</span>
+            <div>
+              <p className="text-xs text-gray-500">Llegan en los próximos 30 días</p>
+              <p className={`text-xl font-bold ${transitStats.arrivingSoon > 0 ? 'text-orange-400' : 'text-gray-500'}`}>{transitStats.arrivingSoon}</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Critical stock */}
       {criticalProducts.length > 0 && (
@@ -587,6 +624,67 @@ function Forecast() {
   const [sortBy,       setSortBy]       = useState('coverage');   // 'coverage' | 'forecast'
   const [urgencyFilter,setUrgencyFilter]= useState(null);         // null | 3 | 5 | 'no_movement'
   const [summaryOpen,  setSummaryOpen]  = useState(false);
+  const [selectedPids,  setSelectedPids]  = useState(new Set());
+  const [quickAddModal, setQuickAddModal] = useState(null);
+  const [quickAddForm,  setQuickAddForm]  = useState({ ref:'', supplier:'', order_date: new Date().toISOString().slice(0,10), expected_arrival:'', targetOrderId:'new' });
+  const [quickAddLines, setQuickAddLines] = useState([]);
+  const [quickAddSaving,setQuickAddSaving]= useState(false);
+  const [existingOrders,setExistingOrders]= useState([]);
+
+  const toggleSelect = (pid) => setSelectedPids(prev => {
+    const s = new Set(prev);
+    s.has(pid) ? s.delete(pid) : s.add(pid);
+    return s;
+  });
+
+  const openQuickAdd = async () => {
+    const selectedProducts = filtered.filter(p => selectedPids.has(p.product_id));
+    if (selectedProducts.length === 0) return;
+    const firstVendor = selectedProducts[0].vendor || '';
+    let existing = [];
+    try {
+      const r = await fetch('/api/transit');
+      const j = await r.json();
+      existing = (j.orders || []).filter(o => (o.status||'active') === 'active');
+    } catch(e) {}
+    setExistingOrders(existing);
+    setQuickAddLines(selectedProducts.map(p => ({
+      product_id: p.product_id,
+      product_name: p.product_name,
+      qty: parseFloat(quantities[p.product_id]) || p.suggested_qty || 1,
+      price: p.vendor_price || p.avg_price || 0,
+    })));
+    setQuickAddForm({ ref:'', supplier: firstVendor, order_date: new Date().toISOString().slice(0,10), expected_arrival:'', targetOrderId:'new' });
+    setQuickAddModal(true);
+  };
+
+  const saveQuickAdd = async () => {
+    if (!quickAddForm.ref && quickAddForm.targetOrderId === 'new') return;
+    setQuickAddSaving(true);
+    try {
+      if (quickAddForm.targetOrderId === 'new') {
+        await fetch('/api/transit', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ ref: quickAddForm.ref, supplier: quickAddForm.supplier, order_date: quickAddForm.order_date, expected_arrival: quickAddForm.expected_arrival, lines: quickAddLines }),
+        });
+      } else {
+        const r = await fetch('/api/transit');
+        const j = await r.json();
+        const order = j.orders.find(o => o.id === quickAddForm.targetOrderId);
+        if (order) {
+          const existingPids = new Set(order.lines.map(l => l.product_id));
+          const merged = [...order.lines, ...quickAddLines.filter(l => !existingPids.has(l.product_id))];
+          await fetch(`/api/transit/${order.id}`, {
+            method:'PATCH', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ ...order, lines: merged }),
+          });
+        }
+      }
+      setQuickAddModal(null);
+      setSelectedPids(new Set());
+    } catch(e) {}
+    setQuickAddSaving(false);
+  };
   const [drafts,       setDrafts]       = useState(() => {
     try { return JSON.parse(localStorage.getItem('opi_drafts') || '[]'); } catch { return []; }
   });
@@ -969,6 +1067,100 @@ function Forecast() {
   return (
     <div className="fade space-y-3">
 
+      {/* ── Quick-add to transit modal overlay ─────────────────────── */}
+      {quickAddModal && (() => {
+        const isNew = quickAddForm.targetOrderId === 'new';
+        const totalLines = quickAddLines.reduce((a,l) => a + (parseFloat(l.qty)||0) * (l.price||0), 0);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={e => { if(e.target===e.currentTarget) setQuickAddModal(null); }}>
+            <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg shadow-2xl flex flex-col" style={{maxHeight:'90vh'}}>
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between shrink-0">
+                <div>
+                  <h3 className="text-white font-bold">📦 Añadir a pedido en tránsito</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">{quickAddLines.length} producto{quickAddLines.length!==1?'s':''} seleccionado{quickAddLines.length!==1?'s':''}</p>
+                </div>
+                <button onClick={() => setQuickAddModal(null)} className="text-gray-500 hover:text-white text-xl leading-none">×</button>
+              </div>
+              {/* Body */}
+              <div className="px-6 py-4 space-y-3 overflow-y-auto flex-1">
+                {/* Target order selector */}
+                {existingOrders.length > 0 && (
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Añadir a</label>
+                    <select value={quickAddForm.targetOrderId}
+                      onChange={e => setQuickAddForm(f => ({...f, targetOrderId: e.target.value}))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500 outline-none">
+                      <option value="new">+ Nuevo pedido</option>
+                      {existingOrders.map(o => <option key={o.id} value={o.id}>{o.ref} ({o.supplier})</option>)}
+                    </select>
+                  </div>
+                )}
+                {/* New order fields */}
+                {isNew && <>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Referencia del pedido *</label>
+                    <input value={quickAddForm.ref} onChange={e => setQuickAddForm(f=>({...f,ref:e.target.value}))}
+                      placeholder="ej. TZ-124" className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500 outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Proveedor</label>
+                    <input value={quickAddForm.supplier} onChange={e => setQuickAddForm(f=>({...f,supplier:e.target.value}))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500 outline-none" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1">Fecha de pedido</label>
+                      <input type="date" value={quickAddForm.order_date} onChange={e => setQuickAddForm(f=>({...f,order_date:e.target.value}))}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500 outline-none" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1">Llegada estimada</label>
+                      <input type="month" value={quickAddForm.expected_arrival} onChange={e => setQuickAddForm(f=>({...f,expected_arrival:e.target.value}))}
+                        className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500 outline-none" />
+                    </div>
+                  </div>
+                </>}
+                {/* Product lines */}
+                <div>
+                  <label className="text-xs text-gray-400 block mb-2">Productos y cantidades</label>
+                  <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                    {quickAddLines.map((line, i) => (
+                      <div key={line.product_id} className="flex items-center gap-2 bg-gray-800/60 border border-gray-700/50 rounded-lg px-3 py-2">
+                        <span className="text-xs text-gray-300 flex-1 truncate" title={line.product_name}>{line.product_name}</span>
+                        {line.price > 0 && <span className="text-xs text-gray-500 shrink-0">{money(line.price)}</span>}
+                        <input type="number" min="0" step="1"
+                          value={line.qty}
+                          onChange={e => {
+                            const v = Math.max(0, parseFloat(e.target.value)||0);
+                            setQuickAddLines(prev => prev.map((l,j) => j===i ? {...l, qty:v} : l));
+                          }}
+                          className="w-20 px-2 py-1 rounded text-sm text-center bg-gray-900 border border-gray-600 text-emerald-300 font-semibold focus:border-amber-500 outline-none" />
+                        <button onClick={() => setQuickAddLines(prev => prev.filter((_,j) => j!==i))}
+                          className="text-gray-600 hover:text-red-400 text-sm leading-none shrink-0">×</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                {totalLines > 0 && (
+                  <div className="text-right text-xs text-emerald-400 font-semibold">
+                    Total estimado: {money(totalLines)}
+                  </div>
+                )}
+              </div>
+              {/* Footer */}
+              <div className="px-6 py-4 border-t border-gray-800 flex gap-3 justify-end shrink-0">
+                <button onClick={() => setQuickAddModal(null)} className="px-4 py-2 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700">Cancelar</button>
+                <button onClick={saveQuickAdd} disabled={quickAddSaving || (isNew && !quickAddForm.ref) || quickAddLines.length === 0}
+                  className="px-4 py-2 rounded-lg text-sm bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white font-semibold">
+                  {quickAddSaving ? '⏳ Guardando...' : '💾 Guardar en tránsito'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Brand filter + actions ── */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 flex items-center gap-3 flex-wrap">
         {/* Marca dropdown */}
@@ -1209,6 +1401,11 @@ function Forecast() {
                   <th className="px-3 py-2.5 text-right" title="Precio del proveedor preferido">Precio</th>
                   <th className="px-3 py-2.5 text-center text-emerald-400 w-28">Cant. compra</th>
                   <th className="px-3 py-2.5 text-right text-emerald-400">Total</th>
+                  {!readOnly && <th className="px-3 py-2.5 text-center w-8" title="Seleccionar todos">
+                    <input type="checkbox" className="accent-amber-500 cursor-pointer w-3.5 h-3.5"
+                      checked={filtered.length > 0 && filtered.every(p => selectedPids.has(p.product_id))}
+                      onChange={e => { if(e.target.checked) setSelectedPids(new Set(filtered.map(p=>p.product_id))); else setSelectedPids(new Set()); }} />
+                  </th>}
                   <th className="px-3 py-2.5 text-center w-8"></th>
                 </tr>
               </thead>
@@ -1310,6 +1507,11 @@ function Forecast() {
                         <td className={`px-3 py-2.5 text-right text-xs font-semibold ${total > 0 ? 'text-emerald-400' : 'text-gray-600'}`}>
                           {total > 0 ? money(total) : '—'}
                         </td>
+                        {!readOnly && <td className="px-3 py-2.5 text-center">
+                          <input type="checkbox" className="accent-amber-500 cursor-pointer w-3.5 h-3.5"
+                            checked={selectedPids.has(p.product_id)}
+                            onChange={() => toggleSelect(p.product_id)} />
+                        </td>}
                         <td className="px-3 py-2.5 text-center">
                           <button onClick={()=>toggleChart(p)}
                             className={`text-xs px-1.5 py-0.5 rounded transition-colors ${isExp ? 'text-indigo-400 bg-indigo-900/40' : 'text-gray-600 hover:text-gray-400'}`}
@@ -1375,8 +1577,30 @@ function Forecast() {
         )}
       </div>
 
-      {/* Spacer so content doesn't hide behind floating summary */}
-      {!readOnly && summaryByVendor.length > 0 && <div style={{height: summaryOpen ? 360 : 56}} />}
+      {/* Spacer so content doesn't hide behind floating bars */}
+      {!readOnly && (summaryByVendor.length > 0 || selectedPids.size > 0) && (
+        <div style={{height: (summaryByVendor.length > 0 ? (summaryOpen ? 360 : 56) : 0) + (selectedPids.size > 0 ? 56 : 0)}} />
+      )}
+
+      {/* ── Floating selection bar (above summary) ── */}
+      {!readOnly && selectedPids.size > 0 && (
+        <div className="fixed left-0 right-0 z-30 fade"
+          style={{bottom: summaryByVendor.length > 0 ? (summaryOpen ? 360 : 56) : 0, background:'#1c1917', borderTop:'1px solid #d97706'}}>
+          <div className="px-5 py-3 flex items-center gap-4">
+            <span className="text-sm text-amber-400 font-semibold">
+              ✓ {selectedPids.size} producto{selectedPids.size!==1?'s':''} seleccionado{selectedPids.size!==1?'s':''}
+            </span>
+            <button onClick={openQuickAdd}
+              className="px-4 py-1.5 rounded-lg text-sm bg-amber-600 hover:bg-amber-500 text-white font-semibold transition-colors">
+              📦 Crear pedido en tránsito
+            </button>
+            <button onClick={() => setSelectedPids(new Set())}
+              className="ml-auto text-xs text-gray-500 hover:text-gray-300 transition-colors">
+              Limpiar selección ×
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Floating sticky summary bar ── */}
       {!readOnly && summaryByVendor.length > 0 && (
@@ -1517,6 +1741,41 @@ function Transit() {
   const [pSearch,      setPSearch]      = useState('');
   const [editingOrder,    setEditingOrder]    = useState(null);
   const [supplierFilter,  setSupplierFilter]  = useState('all');
+  const [sendingOdoo,     setSendingOdoo]     = useState(new Set());
+  const [odooResult,      setOdooResult]      = useState(null); // { po_name, error }
+  const [containerModal,  setContainerModal]  = useState(null); // { order, lines, containerRef }
+  const [archiveModal,    setArchiveModal]    = useState(null); // { order }
+  const [archiveDate,     setArchiveDate]     = useState('');
+  const [showHistory,     setShowHistory]     = useState(false);
+  const [rates,           setRates]           = useState(null);  // { CNY, USD }
+
+  React.useEffect(() => {
+    fetch('/api/exchange-rates').then(r=>r.json()).then(setRates).catch(()=>{});
+  }, []);
+
+  const activeOrders   = orders.filter(o => (o.status||'active') === 'active');
+  const archivedOrders = orders.filter(o => o.status === 'archived');
+
+  const arrivalClass = (dateStr) => {
+    if (!dateStr) return 'text-gray-500 bg-gray-800/60 border-gray-700/50';
+    const today = new Date().toISOString().slice(0,7);
+    const d30   = new Date(Date.now()+30*24*3600*1000).toISOString().slice(0,7);
+    const d60   = new Date(Date.now()+60*24*3600*1000).toISOString().slice(0,7);
+    if (dateStr < today) return 'text-red-400 bg-red-900/30 border-red-800/50';
+    if (dateStr <= d30)  return 'text-orange-400 bg-orange-900/30 border-orange-800/50';
+    if (dateStr <= d60)  return 'text-amber-400 bg-amber-900/30 border-amber-800/50';
+    return 'text-gray-400 bg-gray-800/40 border-gray-700/50';
+  };
+
+  const archiveOrder = async () => {
+    if (!archiveModal) return;
+    await fetch(`/api/transit/${archiveModal.order.id}/archive`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ actual_arrival: archiveDate }),
+    });
+    setArchiveModal(null); setArchiveDate('');
+    loadOrders();
+  };
   const readOnly = useReadOnly();
   const allProducts = forecastData?.products || [];
 
@@ -1561,9 +1820,47 @@ function Transit() {
   };
   const addLine = (product) => {
     if (lines.find(l => l.product_id === product.product_id)) return;
-    setLines(prev => [...prev, { product_id: product.product_id, product_name: product.product_name, qty: product.suggested_qty || 1 }]);
+    setLines(prev => [...prev, { product_id: product.product_id, product_name: product.product_name, qty: product.suggested_qty || 1, price: priceMap[product.product_id] || 0 }]);
     setPSearch('');
   };
+  const openContainerModal = (order) => {
+    const lines = order.lines.map(l => ({
+      ...l,
+      container_qty: l.qty,  // default: all quantity
+      price: l.price || priceMap[l.product_id] || 0,
+    }));
+    setContainerModal({ order, lines, containerRef: order.ref });
+  };
+
+  const sendContainer = async () => {
+    if (!containerModal) return;
+    const { order, lines, containerRef } = containerModal;
+    setSendingOdoo(prev => new Set([...prev, order.id]));
+    setOdooResult(null);
+    setContainerModal(null);
+    try {
+      const payload = {
+        container_ref: containerRef,
+        lines: lines
+          .filter(l => l.container_qty > 0)
+          .map(l => ({ product_id: l.product_id, product_name: l.product_name, qty: l.container_qty, price: l.price })),
+      };
+      const r = await fetch(`/api/transit/${order.id}/send-to-odoo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || 'Error desconocido');
+      setOdooResult({ po_name: j.po_name, error: null });
+      loadOrders();
+    } catch(e) {
+      setOdooResult({ po_name: null, error: e.message });
+    } finally {
+      setSendingOdoo(prev => { const s = new Set(prev); s.delete(order.id); return s; });
+    }
+  };
+
   const saveOrder = async () => {
     if (!form.ref || lines.length === 0) return;
     if (editingOrder) {
@@ -1627,25 +1924,40 @@ function Transit() {
   };
 
   // ── Excel export ────────────────────────────────────────────────────────────
-  const exportTransitExcel = () => {
+  const exportTransitExcel = async () => {
     const XLSX = window.XLSX;
     if (!XLSX) return alert('SheetJS no cargado');
-    const rows = [['Referencia', 'Proveedor', 'Fecha Pedido', 'Llegada Estimada', 'Producto', 'Uds en tránsito']];
+
+    // Collect all unique product IDs across all orders
+    const allPids = [...new Set(orders.flatMap(o => o.lines.map(l => l.product_id).filter(Boolean)))];
+    let details = {};
+    if (allPids.length > 0) {
+      try {
+        const r = await fetch(`/api/products/transit-details?ids=${allPids.join(',')}`);
+        details = await r.json();
+      } catch(e) { /* silently skip if error */ }
+    }
+
+    const rows = [['Referencia', 'Proveedor', 'Fecha Pedido', 'Llegada Estimada', 'Producto', 'Old SKU', 'Ref. Proveedor', 'Uds Originales', 'Uds Pendientes']];
     orders.forEach(o => {
       o.lines.forEach((l, i) => {
+        const d = details[l.product_id] || {};
         rows.push([
           i === 0 ? o.ref : '',
           i === 0 ? (o.supplier || '') : '',
           i === 0 ? (o.order_date || '') : '',
           i === 0 ? (o.expected_arrival || '') : '',
           l.product_name,
+          d.old_sku || '',
+          d.vendor_ref || '',
+          l.original_qty || l.qty,
           l.qty,
         ]);
       });
-      rows.push(['', '', '', '', '', '']); // blank row between orders
+      rows.push(['', '', '', '', '', '', '', '', '']);
     });
     const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [20,20,14,16,40,12].map(w => ({ wch: w }));
+    ws['!cols'] = [20,20,14,16,50,14,16,14,14].map(w => ({ wch: w }));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'En tránsito');
     XLSX.writeFile(wb, `transito_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -1698,8 +2010,99 @@ function Transit() {
     e.target.value = '';
   };
 
+  /* ── Container modal ──────────────────────────────────────────────── */
+  if (containerModal) {
+    const { order: mo, lines: ml, containerRef: mcr } = containerModal;
+    const totalValue = ml.reduce((a, l) => a + l.container_qty * (l.price || 0), 0);
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+        <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl">
+          <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+            <div>
+              <h3 className="text-white font-bold text-base">📦 Nuevo contenedor → Odoo</h3>
+              <p className="text-xs text-gray-500 mt-0.5">Pedido: <span className="text-gray-300">{mo.ref}</span> · {mo.supplier}</p>
+            </div>
+            <button onClick={() => setContainerModal(null)} className="text-gray-500 hover:text-white text-xl">×</button>
+          </div>
+
+          <div className="px-6 py-3 border-b border-gray-800">
+            <label className="text-xs text-gray-400 block mb-1">Referencia de este contenedor</label>
+            <input value={containerModal.containerRef}
+              onChange={e => setContainerModal(m => ({...m, containerRef: e.target.value}))}
+              placeholder={mo.ref}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-purple-500 outline-none" />
+          </div>
+
+          <div className="overflow-auto flex-1">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-4 py-2 text-left text-gray-400 font-medium">Producto</th>
+                  <th className="px-4 py-2 text-right text-gray-400 font-medium">Total pedido</th>
+                  <th className="px-4 py-2 text-right text-gray-400 font-medium">Precio u.</th>
+                  <th className="px-4 py-2 text-right text-gray-400 font-medium w-32">En este contenedor</th>
+                  <th className="px-4 py-2 text-right text-gray-400 font-medium">Subtotal</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {ml.map((line, i) => (
+                  <tr key={line.product_id} className="hover:bg-gray-800/20">
+                    <td className="px-4 py-2.5 text-gray-200">{line.product_name}</td>
+                    <td className="px-4 py-2.5 text-right text-gray-500">{num(line.qty, 0)}</td>
+                    <td className="px-4 py-2.5 text-right text-gray-400">{line.price ? money(line.price) : '—'}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      <input type="number" min="0" max={line.qty} step="1"
+                        value={line.container_qty}
+                        onChange={e => {
+                          const raw = parseFloat(e.target.value) || 0;
+                          const clamped = Math.min(Math.max(raw, 0), line.qty);
+                          setContainerModal(m => ({
+                            ...m,
+                            lines: m.lines.map((l, j) => j === i ? {...l, container_qty: clamped} : l)
+                          }));
+                        }}
+                        className={`w-24 bg-gray-800 border rounded px-2 py-1 text-right text-white focus:border-purple-500 outline-none ${line.container_qty > line.qty ? 'border-red-500' : 'border-gray-700'}`} />
+                    <span className="text-gray-600 text-xs ml-1">/ {num(line.qty,0)}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right text-emerald-400 font-semibold">
+                      {line.price && line.container_qty > 0 ? money(line.container_qty * line.price) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between">
+            <div className="text-sm text-gray-400">
+              Total contenedor: <span className="text-emerald-400 font-bold">{totalValue > 0 ? money(totalValue) : '—'}</span>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setContainerModal(null)}
+                className="px-4 py-2 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700 transition-colors">
+                Cancelar
+              </button>
+              <button onClick={sendContainer}
+                disabled={ml.every(l => l.container_qty === 0)}
+                className="px-4 py-2 rounded-lg text-sm bg-purple-700 hover:bg-purple-600 disabled:opacity-40 text-white font-semibold transition-colors flex items-center gap-2">
+                📤 Crear GCPO en Odoo
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fade space-y-4">
+      {/* Odoo send result banner */}
+      {odooResult && (
+        <div className={`rounded-xl px-4 py-3 flex items-center justify-between gap-3 text-sm font-medium ${odooResult.error ? 'bg-red-900/40 border border-red-700/50 text-red-300' : 'bg-emerald-900/40 border border-emerald-700/50 text-emerald-300'}`}>
+          <span>{odooResult.error ? `❌ Error: ${odooResult.error}` : `✅ Borrador creado en Odoo: ${odooResult.po_name}`}</span>
+          <button onClick={() => setOdooResult(null)} className="text-gray-400 hover:text-white text-lg leading-none">×</button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
@@ -1891,7 +2294,7 @@ function Transit() {
         <div className="space-y-3">
           {(() => {
             const q = transitSearch.toLowerCase().trim();
-            const visibleOrders = orders
+            const visibleOrders = activeOrders
               .filter(o => supplierFilter === 'all' || o.supplier === supplierFilter)
               .filter(o => !q || o.lines.some(l => l.product_name.toLowerCase().includes(q)));
             if (q && visibleOrders.length === 0) return (
@@ -1905,8 +2308,10 @@ function Transit() {
             const horizonStr2 = `${hz2.getFullYear()}-${String(hz2.getMonth()+1).padStart(2,'0')}`;
             return visibleOrders.map(order => {
             const isOpen  = q ? true : !!expanded[order.id];
-            const totalQty   = order.lines.reduce((a, l) => a + l.qty, 0);
-            const totalValue = order.lines.reduce((a, l) => a + l.qty * (priceMap[l.product_id] || 0), 0);
+            const totalQty     = order.lines.reduce((a, l) => a + l.qty, 0);
+            const totalOrigQty = order.lines.reduce((a, l) => a + (l.original_qty || l.qty), 0);
+            const hasPartial   = totalOrigQty > totalQty;
+            const totalValue   = order.lines.reduce((a, l) => a + l.qty * (priceMap[l.product_id] || 0), 0);
             const matchingLines = q ? order.lines.filter(l => l.product_name.toLowerCase().includes(q)) : null;
             const countsInForecast = !order.expected_arrival || order.expected_arrival < horizonStr2;
             return (
@@ -1925,7 +2330,7 @@ function Transit() {
                       )}
                       {order.order_date && <span className="text-xs text-gray-600">{order.order_date}</span>}
                       {order.expected_arrival && (
-                        <span className="text-xs text-amber-400 bg-amber-900/30 border border-amber-800/50 px-2 py-0.5 rounded">
+                        <span className={`text-xs px-2 py-0.5 rounded border ${arrivalClass(order.expected_arrival)}`}>
                           📅 Llegada: {order.expected_arrival}
                         </span>
                       )}
@@ -1935,21 +2340,75 @@ function Transit() {
                       }
                     </div>
                     <p className="text-xs text-gray-500 mt-0.5">
-                      {order.lines.length} producto{order.lines.length!==1?'s':''} · <span className="text-amber-400 font-semibold">{num(totalQty,0)} uds en camino</span>
+                      {order.lines.length} producto{order.lines.length!==1?'s':''} · <span className="text-amber-400 font-semibold">{num(totalQty,0)} uds pendientes</span>
+                      {hasPartial && <span className="text-gray-500"> / {num(totalOrigQty,0)} original</span>}
                       {totalValue > 0 && <span className="ml-2 text-emerald-400 font-semibold">· {money(totalValue)}</span>}
                     </p>
                   </div>
                   {!readOnly && (
                   <div className="flex items-center gap-2 shrink-0">
+                    {order.odoo_po ? (
+                      <span className="flex items-center gap-1 flex-wrap">
+                        {order.odoo_po.split(',').map(po => po.trim()).filter(Boolean).map(po => (
+                          <span key={po} className="flex items-center gap-0.5">
+                            <span title={`OC en Odoo: ${po}`}
+                              className="px-2 py-1 rounded-l text-xs bg-emerald-900/30 border border-emerald-700/50 text-emerald-400 cursor-default">
+                              ✅ {po}
+                            </span>
+                            <button onClick={async e => {
+                                e.stopPropagation();
+                                if (!window.confirm(`¿Desvincular ${po} y restaurar sus cantidades?`)) return;
+                                await fetch(`/api/transit/${order.id}/odoo-link/${encodeURIComponent(po)}`, { method: 'DELETE' });
+                                loadOrders();
+                              }}
+                              title={`Desvincular solo ${po}`}
+                              className="px-1.5 py-1 rounded-r text-xs bg-emerald-900/20 border border-l-0 border-emerald-700/50 text-gray-500 hover:text-red-400 hover:border-red-700 transition-colors">
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                        <button onClick={e => { e.stopPropagation(); openContainerModal(order); }}
+                          disabled={sendingOdoo.has(order.id) || showForm}
+                          title="Añadir otro contenedor"
+                          className="px-2 py-1 rounded text-xs bg-purple-900/30 border border-purple-700/50 text-purple-400 hover:bg-purple-900/60 disabled:opacity-40 transition-colors">
+                          {sendingOdoo.has(order.id) ? '⏳' : '+ contenedor'}
+                        </button>
+                        <button onClick={async e => {
+                            e.stopPropagation();
+                            if (!window.confirm('¿Borrar TODOS los vínculos a Odoo y restaurar cantidades originales?')) return;
+                            await fetch(`/api/transit/${order.id}/odoo-link`, { method: 'DELETE' });
+                            loadOrders();
+                          }}
+                          title="Desvincular todas las OC"
+                          className="px-2 py-1 rounded text-xs bg-gray-800 border border-gray-700 text-gray-500 hover:text-red-400 hover:border-red-700 transition-colors text-xs">
+                          🗑 Todo
+                        </button>
+                      </span>
+                    ) : (
+                      <button onClick={e => { e.stopPropagation(); openContainerModal(order); }}
+                        disabled={sendingOdoo.has(order.id) || showForm}
+                        title="Crear GCPO en Odoo (selecciona cantidades por contenedor)"
+                        className="px-3 py-1.5 rounded-lg text-xs bg-purple-900/30 border border-purple-700/50 text-purple-400 hover:bg-purple-900/60 disabled:opacity-40 transition-colors flex items-center gap-1">
+                        {sendingOdoo.has(order.id) ? '⏳' : '📤'} Odoo
+                      </button>
+                    )}
                     <button onClick={e => { e.stopPropagation(); startEdit(order); }}
-                      disabled={showForm}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-indigo-900/30 border border-indigo-700/50 text-indigo-400 hover:bg-indigo-900/60 disabled:opacity-40 transition-colors flex items-center gap-1">
+                      disabled={showForm || !!order.odoo_po}
+                      title={order.odoo_po ? 'Cancela todas las GCPOs antes de editar' : ''}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-indigo-900/30 border border-indigo-700/50 text-indigo-400 hover:bg-indigo-900/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
                       ✏️ Editar
                     </button>
-                    <button onClick={e => { e.stopPropagation(); deleteOrder(order.id); }}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-red-900/30 border border-red-800/50 text-red-400 hover:bg-red-900/60 transition-colors flex items-center gap-1">
-                      🗑️ Eliminar
-                    </button>
+                    {order.odoo_po ? (
+                      <button onClick={e => { e.stopPropagation(); setArchiveDate(''); setArchiveModal({order}); }}
+                        className="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-400 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                        ✅ Archivar
+                      </button>
+                    ) : (
+                      <button onClick={e => { e.stopPropagation(); deleteOrder(order.id); }}
+                        className="px-3 py-1.5 rounded-lg text-xs bg-red-900/30 border border-red-800/50 text-red-400 hover:bg-red-900/60 transition-colors flex items-center gap-1">
+                        🗑️ Eliminar
+                      </button>
+                    )}
                   </div>
                   )}
                 </div>
@@ -1961,7 +2420,8 @@ function Transit() {
                       <thead>
                         <tr className="border-b border-gray-800 bg-gray-800/30">
                           <th className="px-4 py-2 text-left text-gray-400 font-medium">Producto</th>
-                          <th className="px-4 py-2 text-right text-gray-400 font-medium">Uds</th>
+                          <th className="px-4 py-2 text-right text-gray-400 font-medium">Original</th>
+                          <th className="px-4 py-2 text-right text-gray-400 font-medium">Pendiente</th>
                           <th className="px-4 py-2 text-right text-gray-400 font-medium">Precio u.</th>
                           <th className="px-4 py-2 text-right text-gray-400 font-medium">Subtotal</th>
                           {!readOnly && <th className="px-4 py-2 w-10 text-center text-gray-600 font-normal">Quitar</th>}
@@ -1971,11 +2431,26 @@ function Transit() {
                         {order.lines.map(line => {
                           const isMatch = matchingLines && matchingLines.some(l => l.id === line.id);
                           const dimmed  = matchingLines && !isMatch;
+                          const fullyShipped = line.qty === 0;
+                          const origQty = line.original_qty || line.qty;
                           return (
-                            <tr key={line.id} className={`transition-colors ${dimmed ? 'opacity-25' : 'hover:bg-gray-800/20'} ${isMatch ? 'bg-indigo-950/40' : ''}`}>
-                              <td className="px-4 py-2.5 text-gray-200">{line.product_name}</td>
-                              <td className="px-4 py-2.5 text-right text-amber-400 font-semibold">🚢 +{num(line.qty,0)}</td>
-                              <td className="px-4 py-2.5 text-right text-xs text-gray-400">{priceMap[line.product_id] ? money(priceMap[line.product_id]) : '—'}</td>
+                            <tr key={line.id} className={`transition-colors ${dimmed ? 'opacity-25' : fullyShipped ? 'opacity-40' : 'hover:bg-gray-800/20'} ${isMatch ? 'bg-indigo-950/40' : ''}`}>
+                              <td className="px-4 py-2.5 text-gray-200">
+                                {fullyShipped && <span className="text-emerald-500 mr-1">✓</span>}
+                                {line.product_name}
+                              </td>
+                              <td className="px-4 py-2.5 text-right text-gray-500">{num(origQty,0)}</td>
+                              <td className="px-4 py-2.5 text-right font-semibold">
+                                {fullyShipped
+                                  ? <span className="text-emerald-500">Enviado</span>
+                                  : <span className="text-amber-400">🚢 +{num(line.qty,0)}</span>}
+                              </td>
+                              <td className="px-4 py-2.5 text-right text-xs text-gray-400">
+                                {priceMap[line.product_id] ? <>
+                                  {rates?.USD && <div className="text-white font-medium">${num(priceMap[line.product_id]*rates.USD,2)}</div>}
+                                  <div className="text-gray-500">{money(priceMap[line.product_id])}</div>
+                                </> : '—'}
+                              </td>
                               <td className="px-4 py-2.5 text-right text-xs font-semibold text-emerald-400">{priceMap[line.product_id] ? money(line.qty * priceMap[line.product_id]) : '—'}</td>
                               {!readOnly && (
                               <td className="px-4 py-2.5 text-center">
@@ -1994,6 +2469,119 @@ function Transit() {
             );
           });
           })()}
+        </div>
+      )}
+
+      {/* ── Historial de pedidos archivados ──────────────────────────── */}
+      {archivedOrders.length > 0 && (
+        <div className="bg-gray-900/50 border border-gray-800/50 rounded-xl overflow-hidden">
+          <button onClick={() => setShowHistory(h => !h)}
+            className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/20 transition-colors">
+            <span className="text-sm font-semibold text-gray-400">📁 Historial de pedidos recibidos ({archivedOrders.length})</span>
+            <span className="text-gray-600 text-xs">{showHistory ? '▲ ocultar' : '▼ mostrar'}</span>
+          </button>
+          {showHistory && (
+            <div className="border-t border-gray-800/50 divide-y divide-gray-800/30">
+              {archivedOrders.map(order => {
+                const delay = order.expected_arrival && order.actual_arrival
+                  ? Math.round((new Date(order.actual_arrival+'-01') - new Date(order.expected_arrival+'-01')) / (30*24*3600*1000))
+                  : null;
+                return (
+                  <div key={order.id} className="px-4 py-3 flex items-center justify-between gap-4 opacity-70 hover:opacity-100 transition-opacity">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-bold text-gray-300">{order.ref}</span>
+                        {order.supplier && <span className="text-xs text-gray-500">{order.supplier}</span>}
+                        {order.odoo_po && order.odoo_po.split(',').map(po => po.trim()).filter(Boolean).map(po => (
+                          <span key={po} className="text-xs text-emerald-600 border border-emerald-900 px-1.5 py-0.5 rounded">✅ {po}</span>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-3 mt-1 text-xs text-gray-600">
+                        {order.expected_arrival && <span>📅 Estimada: {order.expected_arrival}</span>}
+                        {order.actual_arrival && <span>✅ Real: {order.actual_arrival}</span>}
+                        {delay !== null && (
+                          <span className={delay <= 0 ? 'text-emerald-600' : 'text-red-500'}>
+                            {delay <= 0 ? `⚡ ${Math.abs(delay)}m antes` : `⚠️ ${delay}m de retraso`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {!readOnly && (
+                      <button onClick={async () => { await fetch(`/api/transit/${order.id}/unarchive`,{method:'PATCH'}); loadOrders(); }}
+                        title="Restaurar a activo"
+                        className="px-2 py-1 rounded text-xs bg-gray-800 border border-gray-700 text-gray-500 hover:text-white transition-colors shrink-0">
+                        ↩ Restaurar
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {/* Supplier performance summary */}
+              {(() => {
+                const perf = {};
+                archivedOrders.filter(o => o.expected_arrival && o.actual_arrival).forEach(o => {
+                  const delay = Math.round((new Date(o.actual_arrival+'-01') - new Date(o.expected_arrival+'-01')) / (30*24*3600*1000));
+                  const s = o.supplier || 'Desconocido';
+                  if (!perf[s]) perf[s] = { count:0, totalDelay:0 };
+                  perf[s].count++; perf[s].totalDelay += delay;
+                });
+                const entries = Object.entries(perf);
+                if (entries.length === 0) return null;
+                return (
+                  <div className="px-4 py-3 border-t border-gray-800/50 bg-gray-800/20">
+                    <p className="text-xs text-gray-500 font-medium mb-2">📊 Rendimiento de proveedores</p>
+                    <div className="flex flex-wrap gap-3">
+                      {entries.map(([supplier, d]) => {
+                        const avg = d.totalDelay / d.count;
+                        return (
+                          <div key={supplier} className="text-xs">
+                            <span className="text-gray-400">{supplier.split(' ')[0]}</span>
+                            <span className={`ml-1 font-semibold ${avg <= 0 ? 'text-emerald-400' : avg <= 1 ? 'text-amber-400' : 'text-red-400'}`}>
+                              {avg <= 0 ? `⚡ ${Math.abs(avg).toFixed(1)}m antes` : `⚠️ +${avg.toFixed(1)}m`}
+                            </span>
+                            <span className="text-gray-600 ml-1">({d.count} pedidos)</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Archive modal ─────────────────────────────────────────────── */}
+      {archiveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-sm shadow-2xl">
+            <div className="px-6 py-4 border-b border-gray-800">
+              <h3 className="text-white font-bold">✅ Archivar pedido</h3>
+              <p className="text-xs text-gray-500 mt-0.5">{archiveModal.order.ref} · {archiveModal.order.supplier}</p>
+            </div>
+            <div className="px-6 py-4 space-y-3">
+              <p className="text-xs text-gray-400">¿Cuándo llegó realmente la mercancía?</p>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Fecha real de llegada</label>
+                <input type="month" value={archiveDate} onChange={e => setArchiveDate(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-emerald-500 outline-none" />
+              </div>
+              {archiveDate && archiveModal.order.expected_arrival && (() => {
+                const d = Math.round((new Date(archiveDate+'-01') - new Date(archiveModal.order.expected_arrival+'-01')) / (30*24*3600*1000));
+                return <p className={`text-xs font-medium ${d <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {d <= 0 ? `⚡ Llegó ${Math.abs(d)} mes(es) antes de lo previsto` : `⚠️ Llegó con ${d} mes(es) de retraso`}
+                </p>;
+              })()}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-800 flex gap-3 justify-end">
+              <button onClick={() => setArchiveModal(null)} className="px-4 py-2 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700">Cancelar</button>
+              <button onClick={archiveOrder}
+                className="px-4 py-2 rounded-lg text-sm bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">
+                ✅ Archivar
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
