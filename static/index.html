@@ -11,7 +11,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; background: #030712; color: #f1f5f9; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #030712; color: #f1f5f9; transition: background .2s, color .2s; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #111827; }
     ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
@@ -20,6 +20,79 @@
     .sk { background: linear-gradient(90deg,#1f2937 25%,#374151 50%,#1f2937 75%);
           background-size:200% 100%; animation:sk 1.4s infinite; border-radius:6px; }
     @keyframes sk { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+
+    /* ── Light mode ── */
+    html.light body { background:#f1f5f9; color:#0f172a; }
+    html.light ::-webkit-scrollbar-track { background:#e2e8f0; }
+    html.light ::-webkit-scrollbar-thumb { background:#94a3b8; }
+    html.light .sk { background:linear-gradient(90deg,#e2e8f0 25%,#f8fafc 50%,#e2e8f0 75%); background-size:200% 100%; }
+    /* backgrounds */
+    html.light .bg-gray-950 { background-color:#e2e8f0 !important; }
+    html.light .bg-gray-900 { background-color:#ffffff !important; }
+    html.light .bg-gray-800 { background-color:#f1f5f9 !important; }
+    html.light .bg-gray-700 { background-color:#e2e8f0 !important; }
+    html.light .bg-gray-600 { background-color:#cbd5e1 !important; }
+    html.light .bg-gray-950\/50 { background-color:rgba(226,232,240,.5) !important; }
+    html.light .bg-gray-900\/80 { background-color:rgba(255,255,255,.8) !important; }
+    html.light .bg-gray-900\/70 { background-color:rgba(255,255,255,.7) !important; }
+    html.light .bg-gray-800\/60 { background-color:rgba(241,245,249,.6) !important; }
+    html.light .bg-gray-800\/50 { background-color:rgba(241,245,249,.5) !important; }
+    html.light .bg-gray-800\/40 { background-color:rgba(241,245,249,.4) !important; }
+    html.light .bg-gray-800\/30 { background-color:rgba(241,245,249,.3) !important; }
+    html.light .bg-gray-800\/20 { background-color:rgba(241,245,249,.2) !important; }
+    html.light .bg-gray-700\/60 { background-color:rgba(226,232,240,.6) !important; }
+    html.light .bg-gray-700\/40 { background-color:rgba(226,232,240,.4) !important; }
+    /* text */
+    html.light .text-white    { color:#0f172a !important; }
+    html.light .text-gray-100 { color:#1e293b !important; }
+    html.light .text-gray-200 { color:#1e293b !important; }
+    html.light .text-gray-300 { color:#334155 !important; }
+    html.light .text-gray-400 { color:#475569 !important; }
+    html.light .text-gray-500 { color:#64748b !important; }
+    html.light .text-gray-600 { color:#94a3b8 !important; }
+    /* borders */
+    html.light .border-gray-800    { border-color:#e2e8f0 !important; }
+    html.light .border-gray-800\/40{ border-color:rgba(226,232,240,.4) !important; }
+    html.light .border-gray-800\/20{ border-color:rgba(226,232,240,.2) !important; }
+    html.light .border-gray-700    { border-color:#cbd5e1 !important; }
+    html.light .border-gray-700\/80{ border-color:rgba(203,213,225,.8) !important; }
+    html.light .border-gray-700\/60{ border-color:rgba(203,213,225,.6) !important; }
+    html.light .border-gray-700\/50{ border-color:rgba(203,213,225,.5) !important; }
+    html.light .border-gray-600    { border-color:#94a3b8 !important; }
+    /* dividers */
+    html.light .divide-gray-800 > * + * { border-color:#e2e8f0 !important; }
+    html.light .divide-gray-800\/60 > * + * { border-color:rgba(226,232,240,.6) !important; }
+    html.light .divide-gray-800\/50 > * + * { border-color:rgba(226,232,240,.5) !important; }
+    html.light .divide-gray-700\/50 > * + * { border-color:rgba(203,213,225,.5) !important; }
+    /* hover */
+    html.light .hover\:bg-gray-800:hover { background-color:#f1f5f9 !important; }
+    html.light .hover\:bg-gray-700:hover { background-color:#e2e8f0 !important; }
+    html.light .hover\:bg-gray-800\/40:hover { background-color:rgba(241,245,249,.4) !important; }
+    /* KPI gradient cards in light mode */
+    html.light .from-indigo-900\/50  { --tw-gradient-from:rgba(238,242,255,.6); }
+    html.light .to-indigo-800\/20    { --tw-gradient-to:rgba(224,231,255,.3); }
+    html.light .border-indigo-700\/30{ border-color:rgba(165,180,252,.4) !important; }
+    html.light .from-cyan-900\/50    { --tw-gradient-from:rgba(236,254,255,.6); }
+    html.light .to-cyan-800\/20      { --tw-gradient-to:rgba(207,250,254,.3); }
+    html.light .border-cyan-700\/30  { border-color:rgba(103,232,249,.4) !important; }
+    html.light .from-emerald-900\/50 { --tw-gradient-from:rgba(236,253,245,.6); }
+    html.light .to-emerald-800\/20   { --tw-gradient-to:rgba(209,250,229,.3); }
+    html.light .border-emerald-700\/30{ border-color:rgba(52,211,153,.4) !important; }
+    html.light .from-amber-900\/50   { --tw-gradient-from:rgba(255,251,235,.6); }
+    html.light .to-amber-800\/20     { --tw-gradient-to:rgba(254,243,199,.3); }
+    html.light .border-amber-700\/30 { border-color:rgba(251,191,36,.4) !important; }
+    html.light .from-rose-900\/50    { --tw-gradient-from:rgba(255,241,242,.6); }
+    html.light .to-rose-800\/20      { --tw-gradient-to:rgba(255,228,230,.3); }
+    html.light .border-rose-700\/30  { border-color:rgba(251,113,133,.4) !important; }
+    html.light .from-violet-900\/50  { --tw-gradient-from:rgba(245,243,255,.6); }
+    html.light .to-violet-800\/20    { --tw-gradient-to:rgba(237,233,254,.3); }
+    html.light .border-violet-700\/30{ border-color:rgba(167,139,250,.4) !important; }
+    /* inputs & selects */
+    html.light input, html.light select, html.light textarea {
+      background-color:#ffffff !important; color:#0f172a !important;
+      border-color:#cbd5e1 !important;
+    }
+    html.light input::placeholder { color:#94a3b8 !important; }
   </style>
 </head>
 <body>
@@ -50,6 +123,15 @@ const TREND = {
   stable: { icon:'➡️', label:'Estable',   cls:'text-blue-400'    },
 };
 const COLORS = ['#6366f1','#22d3ee','#a3e635','#f97316','#ec4899','#facc15','#34d399','#818cf8','#fb7185','#38bdf8'];
+
+/* ── Theme ── */
+const ThemeCtx = React.createContext(true); // true = dark (default)
+const useTheme = () => React.useContext(ThemeCtx);
+
+/* ── Read-only mode ── */
+const ReadOnlyCtx = React.createContext(false);
+const useReadOnly = () => React.useContext(ReadOnlyCtx);
+const IS_READONLY = window.location.pathname.startsWith('/view/');
 
 /* ── API hook ── */
 function useApi(url) {
@@ -83,16 +165,16 @@ function CJChart({ type, data, options, height=220 }) {
   return <canvas ref={ref} height={height} />;
 }
 
-const baseOpts = {
+const baseOpts = (dark=true) => ({
   responsive: true, maintainAspectRatio: false,
-  plugins: { legend: { labels: { color:'#9ca3af', boxWidth:12, font:{size:11} } } },
-};
-const gridColor = '#1f2937';
-const tickColor  = '#6b7280';
-const scaleOpts = (axis='y', money=false) => ({
-  grid:{ color: axis==='x' ? 'transparent' : gridColor },
-  ticks:{ color:tickColor, font:{size:10},
-    callback: money ? (v) => `€${(v/1000).toFixed(0)}k` : undefined }
+  plugins: { legend: { labels: { color: dark ? '#9ca3af' : '#64748b', boxWidth:12, font:{size:11} } } },
+});
+const gridColor = (dark=true) => dark ? '#1f2937' : '#e2e8f0';
+const tickColor  = (dark=true) => dark ? '#6b7280' : '#64748b';
+const scaleOpts = (dark=true, axis='y', isMoney=false) => ({
+  grid:{ color: axis==='x' ? 'transparent' : gridColor(dark) },
+  ticks:{ color:tickColor(dark), font:{size:10},
+    callback: isMoney ? (v) => `€${(v/1000).toFixed(0)}k` : undefined }
 });
 
 /* ── Skeleton ── */
@@ -131,6 +213,18 @@ const Err = ({msg, onRetry}) => (
 ══════════════════════════════════════════════════════════════ */
 function Dashboard() {
   const { data, loading, error, refresh } = useApi('/api/dashboard');
+  const { data: forecastData } = useApi('/api/forecast');
+  const dark = useTheme();
+
+  const criticalProducts = useMemo(() => {
+    if (!forecastData?.products) return [];
+    return forecastData.products
+      .filter(p => p.coverage_months < 2 && p.coverage_months > -99)
+      .filter(p => !p.product_name.toUpperCase().includes('PACK'))
+      .filter(p => !p.is_kit)
+      .sort((a, b) => a.coverage_months - b.coverage_months)
+      .slice(0, 8);
+  }, [forecastData]);
 
   const trendChartData = useMemo(() => {
     if (!data?.trend) return null;
@@ -148,10 +242,10 @@ function Dashboard() {
   }, [data]);
 
   const trendOpts = useMemo(() => ({
-    ...baseOpts,
-    scales: { x: scaleOpts('x'), y: scaleOpts('y', true) },
-    plugins: { ...baseOpts.plugins, legend: { display: false } },
-  }), []);
+    ...baseOpts(dark),
+    scales: { x: scaleOpts(dark,'x'), y: scaleOpts(dark,'y',true) },
+    plugins: { ...baseOpts(dark).plugins, legend: { display: false } },
+  }), [dark]);
 
   const supplierChartData = useMemo(() => {
     if (!data?.top_suppliers) return null;
@@ -167,14 +261,14 @@ function Dashboard() {
   }, [data]);
 
   const supplierOpts = useMemo(() => ({
-    ...baseOpts,
+    ...baseOpts(dark),
     indexAxis: 'y',
     scales: {
-      x: { ...scaleOpts('x', true), grid:{ color: gridColor } },
-      y: { ticks:{ color:'#d1d5db', font:{size:10} }, grid:{ color:'transparent' } }
+      x: { ...scaleOpts(dark,'x',true), grid:{ color: gridColor(dark) } },
+      y: { ticks:{ color: dark ? '#d1d5db' : '#334155', font:{size:10} }, grid:{ color:'transparent' } }
     },
-    plugins: { ...baseOpts.plugins, legend:{ display:false } },
-  }), []);
+    plugins: { ...baseOpts(dark).plugins, legend:{ display:false } },
+  }), [dark]);
 
   if (error) return <Err msg={error} onRetry={refresh} />;
 
@@ -207,6 +301,46 @@ function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* Critical stock */}
+      {criticalProducts.length > 0 && (
+        <div className="bg-gray-900 border border-red-900/40 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-red-400">🔴 Stock crítico — menos de 2 meses de cobertura</h3>
+            <span className="text-xs text-gray-500">{criticalProducts.length} producto{criticalProducts.length!==1?'s':''}</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-gray-500 uppercase border-b border-gray-800">
+                  <th className="px-4 py-2 text-left">Producto</th>
+                  <th className="px-4 py-2 text-right">Stock actual</th>
+                  <th className="px-4 py-2 text-right">Cobertura</th>
+                  <th className="px-4 py-2 text-right">Sugerido</th>
+                </tr>
+              </thead>
+              <tbody>
+                {criticalProducts.map(p => {
+                  const cov = p.coverage_months;
+                  const covCls = cov <= 0 ? 'text-red-400' : cov < 1 ? 'text-orange-400' : 'text-yellow-400';
+                  const covLabel = cov <= 0 ? 'Sin stock' : `${cov.toFixed(1)} meses`;
+                  return (
+                    <tr key={p.product_id} className="border-b border-gray-800/40 hover:bg-gray-800/30">
+                      <td className="px-4 py-2.5">
+                        <p className="text-gray-200 text-xs truncate max-w-xs" title={p.product_name}>{p.product_name}</p>
+                        <p className="text-gray-500 text-xs">{p.old_sku}</p>
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-gray-300 text-xs">{num(p.qty_available,0)} uds</td>
+                      <td className={`px-4 py-2.5 text-right text-xs font-semibold ${covCls}`}>{covLabel}</td>
+                      <td className="px-4 py-2.5 text-right text-xs font-bold text-white">{num(p.suggested_qty,0)} uds</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Last orders */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
@@ -418,6 +552,23 @@ function Spark({ data, color='#6366f1', w=80, h=28 }) {
 ══════════════════════════════════════════════════════════════ */
 function Forecast() {
   const { data, loading, error, refresh } = useApi('/api/forecast');
+  const { data: transitData, refresh: refreshTransit } = useApi('/api/transit');
+  const dark = useTheme();
+  const readOnly = useReadOnly();
+  const transitQtyByProduct = useMemo(() => {
+    const map = {};
+    const now = new Date();
+    // Horizon: 6 months from today (exclusive — if arrival === horizon month, it arrives too late)
+    const hz = new Date(now.getFullYear(), now.getMonth() + 5, 1);
+    const horizonStr = `${hz.getFullYear()}-${String(hz.getMonth()+1).padStart(2,'0')}`;
+    (transitData?.orders || []).forEach(o => {
+      const arrival = o.expected_arrival; // "YYYY-MM" or ""
+      // Count if: no date set (assume it arrives in time) OR arrives strictly before horizon
+      if (arrival && arrival >= horizonStr) return;
+      o.lines.forEach(l => { map[l.product_id] = (map[l.product_id] || 0) + l.qty; });
+    });
+    return map;
+  }, [transitData]);
   const [refreshing, setRefreshing] = useState(false);
   const hardRefresh = async () => {
     setRefreshing(true);
@@ -587,7 +738,9 @@ function Forecast() {
   const prefillForecast = () => {
     const upd = {};
     filtered.forEach(p => {
-      if ((p.suggested_qty || 0) > 0) upd[p.product_id] = p.suggested_qty;
+      const transit = transitQtyByProduct[p.product_id] || 0;
+      const adjusted = Math.max(0, Math.round(p.total_forecast_qty - (p.virtual_available + transit)));
+      if (adjusted > 0) upd[p.product_id] = adjusted;
     });
     setQuantities(prev => ({...prev, ...upd}));
   };
@@ -624,7 +777,7 @@ function Forecast() {
       filtered.forEach(p => {
         if ((p.suggested_qty || 0) > 0) { result[p.product_id] = p.suggested_qty; filled++; }
       });
-      msgs.push(`✓ ${filled} productos rellenados (ventas 6m − stock disponible)`);
+      msgs.push(`✓ ${filled} productos rellenados (ventas 5m − stock disponible)`);
     }
 
     else {
@@ -759,7 +912,7 @@ function Forecast() {
           { type:'bar', label:'Ventas reales',
             data:[...hist.map(h=>h.qty), ...fore.map(()=>null)],
             backgroundColor:'rgba(99,102,241,0.45)', borderColor:'#6366f1', borderWidth:1 },
-          { type:'line', label:'Pronóstico 6m',
+          { type:'line', label:'Pronóstico 5m',
             data:[...hist.map(()=>null), ...fore.map(f=>f.qty)],
             borderColor:'#22d3ee', backgroundColor:'rgba(34,211,238,0.1)',
             fill:true, tension:0.4, borderDash:[5,4], pointRadius:5, pointBackgroundColor:'#22d3ee' },
@@ -769,10 +922,10 @@ function Forecast() {
   };
 
   const chartOpts = useMemo(() => ({
-    ...baseOpts,
-    scales: { x: scaleOpts('x'), y: scaleOpts('y') },
-    plugins: { ...baseOpts.plugins },
-  }), []);
+    ...baseOpts(dark),
+    scales: { x: scaleOpts(dark,'x'), y: scaleOpts(dark,'y') },
+    plugins: { ...baseOpts(dark).plugins },
+  }), [dark]);
 
   // Excel export
   const exportExcel = () => {
@@ -782,7 +935,7 @@ function Forecast() {
     const rows = [
       ['Producto','SKU Antiguo','Fabricante','Proveedor','Cód. Proveedor',
        'Stock Actual','+ Entradas pendientes','− Salidas confirmadas','= Stock Previsto',
-       'Venta/mes (uds)','Cobertura (meses)','Pron. 6m (uds ventas)',
+       'Venta/mes (uds)','Cobertura (meses)','Pron. 5m (uds ventas)',
        'Pron. M1','Pron. M2','Pron. M3','Pron. M4','Pron. M5','Pron. M6',
        'Cant. sugerida','Cantidad a comprar','Precio unit.','Total compra','Tendencia'],
     ];
@@ -818,40 +971,30 @@ function Forecast() {
 
       {/* ── Brand filter + actions ── */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 flex items-center gap-3 flex-wrap">
-        <span className="text-xs text-gray-400 font-medium uppercase tracking-wide">Fabricante</span>
-        <div className="flex flex-col gap-2 flex-1">
-          {/* Row 1: marcas */}
-          <div className="flex gap-2 flex-wrap items-center">
-            <span className="text-xs text-gray-500 uppercase tracking-wide w-16 shrink-0">Marca</span>
-            {brands.map(b=>(
-              <button key={b.id} onClick={()=>selectBrand(b.id)}
-                className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors
-                  ${brandFilter===b.id ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-900/50'
-                    : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'}`}>
-                {b.name}
-              </button>
-            ))}
-          </div>
-          {/* Row 2: fábricas vinculadas (proveedores reales del historial de compras) */}
-          {vendorsForBrand.length > 0 && (
-            <div className="flex gap-2 flex-wrap items-center">
-              <span className="text-xs text-gray-500 uppercase tracking-wide w-16 shrink-0">Fábrica</span>
-              <button onClick={()=>setVendorFilter('all')}
-                className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors
-                  ${vendorFilter==='all' ? 'bg-violet-700 border-violet-500 text-white' : 'bg-gray-800/60 border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
-                Todas ({vendorsForBrand.length})
-              </button>
-              {vendorsForBrand.map(v=>(
-                <button key={v} onClick={()=>setVendorFilter(v)}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors
-                    ${vendorFilter===v ? 'bg-violet-700 border-violet-500 text-white' : 'bg-gray-800/60 border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
-                  {v.length > 35 ? v.slice(0,33)+'…' : v}
-                </button>
-              ))}
-            </div>
-          )}
+        {/* Marca dropdown */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500 uppercase tracking-wide shrink-0">Marca</span>
+          <select value={brandFilter === 'all' ? 'all' : brandFilter}
+            onChange={e => selectBrand(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
+            className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer">
+            <option value="all">Todas las marcas</option>
+            {brands.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
         </div>
+        {/* Fábrica dropdown */}
+        {vendorsForBrand.length > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500 uppercase tracking-wide shrink-0">Fábrica</span>
+            <select value={vendorFilter}
+              onChange={e => setVendorFilter(e.target.value)}
+              className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-violet-500 cursor-pointer max-w-xs">
+              <option value="all">Todas ({vendorsForBrand.length})</option>
+              {vendorsForBrand.map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </div>
+        )}
         <div className="ml-auto flex items-center gap-2">
+          {!readOnly && <>
           <button onClick={prefillForecast}
             title="Cant. compra = Déficit de stock (si Previsto < 0) + Demanda estimada 3 meses"
             className="px-3 py-1.5 rounded-lg text-xs bg-indigo-700 hover:bg-indigo-600 text-white border border-indigo-600 transition-colors">
@@ -866,6 +1009,8 @@ function Forecast() {
             className="px-3 py-1.5 rounded-lg text-xs bg-violet-700 hover:bg-violet-600 disabled:opacity-40 disabled:cursor-not-allowed text-white border border-violet-600 transition-colors">
             💾 Guardar
           </button>
+          </>}
+          {!readOnly && (
           <div className="relative group">
             <button className="px-3 py-1.5 rounded-lg text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 border border-gray-600 transition-colors">
               📂{drafts.length > 0 ? ` ${drafts.length}` : ''}
@@ -900,6 +1045,7 @@ function Forecast() {
               ))}
             </div>
           </div>
+          )}
           <button onClick={exportExcel}
             className="px-3 py-1.5 rounded-lg text-xs bg-emerald-700 hover:bg-emerald-600 text-white border border-emerald-600 transition-colors flex items-center gap-1">
             📥 Exportar Excel
@@ -952,8 +1098,8 @@ function Forecast() {
             placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-64" />
         <span className="text-xs text-gray-500">{filtered.length} productos</span>
         <span className="text-xs text-gray-600 border border-gray-700 rounded-lg px-2 py-1"
-          title="Pronóstico basado en historial de VENTAS (sale.order) de los últimos 12 meses. Horizonte 6 meses = lead time del contenedor. Cant. sugerida = ventas proyectadas 6m − stock disponible (incluyendo entradas pendientes).">
-          📦 Pron. 6m = ventas estimadas · horizonte <span className="text-indigo-400">lead time contenedor</span>
+          title="Pronóstico basado en historial de VENTAS (sale.order) de los últimos 12 meses. Horizonte 5 meses = lead time del contenedor. Cant. sugerida = ventas proyectadas 5m − stock disponible (incluyendo entradas pendientes).">
+          📦 Pron. 5m = ventas estimadas · horizonte <span className="text-indigo-400">lead time contenedor</span>
         </span>
         {!loading && data && (
           <span className="text-xs text-gray-600 flex items-center gap-1">
@@ -1057,7 +1203,7 @@ function Forecast() {
                   <th className="px-3 py-2.5 text-right text-emerald-500" title="Stock Actual + Entradas − Salidas = lo que tendrás disponible">= Previsto</th>
                   <th className="px-3 py-2.5 text-right text-indigo-400" title="Tendencia de ventas (suavizado exponencial sobre historial de ventas)">Histórico</th>
                   <th className="px-3 py-2.5 text-right text-indigo-400" title="Unidades vendidas por mes de media (últimos 3 meses)">Venta/mes</th>
-                  <th className="px-3 py-2.5 text-right text-indigo-400" title="Ventas proyectadas en los próximos 6 meses (lead time contenedor)">Pron. 6m</th>
+                  <th className="px-3 py-2.5 text-right text-indigo-400" title="Ventas proyectadas en los próximos 5 meses (lead time contenedor)">Pron. 5m</th>
                   <th className="px-3 py-2.5 text-center" title="Meses de cobertura = stock previsto ÷ ventas mensuales. Rojo &lt;3m, Naranja 3-5m, Verde &gt;5m">Cobertura</th>
                   <th className="px-3 py-2.5 text-center" title="Tendencia de ventas (últimos 6 meses)">Tend.</th>
                   <th className="px-3 py-2.5 text-right" title="Precio del proveedor preferido">Precio</th>
@@ -1075,6 +1221,12 @@ function Forecast() {
                   const total   = (parseFloat(qty)||0) * price;
                   const qtyNum  = parseFloat(qty)||0;
 
+                  // Transit adjustment
+                  const transitQty     = transitQtyByProduct[p.product_id] || 0;
+                  const adjVirtual     = p.virtual_available + transitQty;
+                  const adjCoverage    = p.monthly_velocity > 0 ? adjVirtual / p.monthly_velocity : 99;
+                  const adjSuggested   = Math.max(0, Math.round(p.total_forecast_qty - adjVirtual));
+
                   // Stock real color
                   const stockCls = p.qty_available <= 0 ? 'text-red-400 font-bold'
                     : p.qty_available < 3 ? 'text-orange-400 font-semibold'
@@ -1084,7 +1236,10 @@ function Forecast() {
                     <React.Fragment key={p.product_id}>
                       <tr className={`border-b border-gray-800/40 hover:bg-gray-800/30 transition-colors ${isExp ? 'bg-indigo-950/30' : ''}`}>
                         <td className="px-3 py-2.5 sticky left-0 bg-gray-900 z-10 min-w-0 group/name relative" style={{maxWidth:260}}>
-                          <div className="truncate text-gray-200 font-medium text-xs" title={p.product_name}>{p.product_name}</div>
+                          <div className="truncate text-gray-200 font-medium text-xs" title={p.product_name}>
+                            {p.is_kit && <span className="mr-1 text-amber-500" title="Kit — stock calculado desde componentes">🧩</span>}
+                            {p.product_name}
+                          </div>
                           <div className="absolute left-0 top-full mt-1 z-50 hidden group-hover/name:block bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-xs text-gray-100 shadow-xl whitespace-normal max-w-xs pointer-events-none" style={{minWidth:200}}>
                             {p.product_name}
                           </div>
@@ -1095,12 +1250,19 @@ function Forecast() {
                         </td>
                         {/* Stock Actual */}
                         <td className={`px-3 py-2.5 text-right text-xs font-semibold ${stockCls}`}>{num(p.qty_available,0)}</td>
-                        {/* + Entradas */}
-                        <td className="px-3 py-2.5 text-right text-xs text-cyan-400">{p.incoming_qty > 0 ? '+'+num(p.incoming_qty,0) : <span className="text-gray-600">—</span>}</td>
+                        {/* + Entradas (Odoo + tránsito) */}
+                        <td className="px-3 py-2.5 text-right text-xs">
+                          {p.incoming_qty > 0 && <div className="text-cyan-400">+{num(p.incoming_qty,0)}</div>}
+                          {transitQty > 0 && <div className="text-amber-400" title="Pedido en tránsito (no en Odoo aún)">🚢+{num(transitQty,0)}</div>}
+                          {p.incoming_qty === 0 && transitQty === 0 && <span className="text-gray-600">—</span>}
+                        </td>
                         {/* − Salidas */}
                         <td className="px-3 py-2.5 text-right text-xs text-orange-400">{p.outgoing_qty > 0 ? '−'+num(p.outgoing_qty,0) : <span className="text-gray-600">—</span>}</td>
-                        {/* = Previsto */}
-                        <td className={`px-3 py-2.5 text-right text-xs font-semibold ${p.virtual_available < 0 ? 'text-red-400' : 'text-emerald-400'}`}>{num(p.virtual_available,0)}</td>
+                        {/* = Previsto (ajustado con tránsito) */}
+                        <td className={`px-3 py-2.5 text-right text-xs font-semibold ${adjVirtual < 0 ? 'text-red-400' : 'text-emerald-400'}`}
+                            title={transitQty > 0 ? `Sin tránsito: ${num(p.virtual_available,0)} · Con tránsito: ${num(adjVirtual,0)}` : ''}>
+                          {num(adjVirtual,0)}{transitQty > 0 && <span className="text-amber-500 ml-0.5" style={{fontSize:9}}>🚢</span>}
+                        </td>
                         {/* Histórico sparkline */}
                         <td className="px-3 py-2.5 text-right">
                           <Spark data={(p.history||[]).map(h=>h.qty)} color="#6366f1" />
@@ -1109,14 +1271,14 @@ function Forecast() {
                         <td className="px-3 py-2.5 text-right text-xs text-indigo-300 font-semibold">
                           {num(p.monthly_velocity,1)}
                         </td>
-                        {/* Pron. 6m total */}
+                        {/* Pron. 5m total */}
                         <td className="px-3 py-2.5 text-right text-xs text-indigo-300 font-semibold">
                           {num(p.total_forecast_qty,0)}
                         </td>
-                        {/* Cobertura con semáforo */}
+                        {/* Cobertura con semáforo (ajustada con tránsito) */}
                         <td className="px-3 py-2.5 text-center">
                           {(() => {
-                            const cm = p.coverage_months;
+                            const cm = adjCoverage;
                             if (cm >= 99) return <span className="text-xs text-gray-600">—</span>;
                             const cls = cm < 3 ? 'text-red-400 font-bold' : cm < 5 ? 'text-orange-400 font-semibold' : 'text-emerald-400';
                             const icon = cm < 3 ? '🔴' : cm < 5 ? '🟠' : '🟢';
@@ -1132,15 +1294,18 @@ function Forecast() {
                         </td>
                         <td className="px-3 py-2.5 text-right text-xs text-gray-400">{money(price)}</td>
                         <td className="px-3 py-2.5 text-center">
-                          <input
-                            type="number" min="0" step="1"
-                            value={qty}
-                            onChange={e => setQuantities(prev => ({...prev, [p.product_id]: e.target.value}))}
-                            placeholder="0"
-                            className={`w-20 px-2 py-1 rounded-lg text-sm text-center border transition-colors
-                              bg-gray-800 focus:outline-none focus:border-emerald-500
-                              ${qtyNum > 0 ? 'border-emerald-600 text-emerald-300 font-semibold' : 'border-gray-600 text-gray-300'}`}
-                          />
+                          {readOnly
+                            ? <span className={`text-sm font-semibold ${qtyNum > 0 ? 'text-emerald-300' : 'text-gray-600'}`}>{qtyNum > 0 ? num(qtyNum,0) : '—'}</span>
+                            : <input
+                                type="number" min="0" step="1"
+                                value={qty}
+                                onChange={e => setQuantities(prev => ({...prev, [p.product_id]: e.target.value}))}
+                                placeholder="0"
+                                className={`w-20 px-2 py-1 rounded-lg text-sm text-center border transition-colors
+                                  bg-gray-800 focus:outline-none focus:border-emerald-500
+                                  ${qtyNum > 0 ? 'border-emerald-600 text-emerald-300 font-semibold' : 'border-gray-600 text-gray-300'}`}
+                              />
+                          }
                         </td>
                         <td className={`px-3 py-2.5 text-right text-xs font-semibold ${total > 0 ? 'text-emerald-400' : 'text-gray-600'}`}>
                           {total > 0 ? money(total) : '—'}
@@ -1168,7 +1333,7 @@ function Forecast() {
                                   { label:'Ventas 12m', val: num((p.history||[]).reduce((a,h)=>a+h.qty,0),0)+' uds' },
                                   { label:'Mes pico', val: (() => { const mx=(p.history||[]).reduce((a,h)=>h.qty>a.qty?h:a,{qty:0,month:'—'}); return `${mx.month} (${num(mx.qty,0)})` })() },
                                   { label:'Vel. media', val: num(p.monthly_velocity,1)+' uds/mes', cls:'text-indigo-300' },
-                                  { label:'Pron. 6m', val: num(p.total_forecast_qty,0)+' uds', cls:'text-cyan-300' },
+                                  { label:'Pron. 5m', val: num(p.total_forecast_qty,0)+' uds', cls:'text-cyan-300' },
                                   { label:'Cobertura', val: p.coverage_months>=99 ? '—' : num(p.coverage_months,1)+'m',
                                     cls: p.coverage_months<3?'text-red-400':p.coverage_months<5?'text-orange-400':'text-emerald-400' },
                                   { label:'Tendencia', val: (TREND[p.trend]?.icon||'')+' '+(TREND[p.trend]?.label||p.trend), cls: TREND[p.trend]?.cls },
@@ -1211,12 +1376,12 @@ function Forecast() {
       </div>
 
       {/* Spacer so content doesn't hide behind floating summary */}
-      {summaryByVendor.length > 0 && <div style={{height: summaryOpen ? 360 : 56}} />}
+      {!readOnly && summaryByVendor.length > 0 && <div style={{height: summaryOpen ? 360 : 56}} />}
 
       {/* ── Floating sticky summary bar ── */}
-      {summaryByVendor.length > 0 && (
+      {!readOnly && summaryByVendor.length > 0 && (
         <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-gray-700/80 shadow-2xl fade"
-             style={{background:'#0f172a'}}>
+             style={{background: dark ? '#0f172a' : '#ffffff'}}>
 
           {/* Expanded vendor list */}
           {summaryOpen && (
@@ -1332,10 +1497,508 @@ function Status() {
    APP
 ══════════════════════════════════════════════════════════════ */
 const TABS = [
-  { id:'dashboard', label:'Dashboard',       icon:'📊' },
-  { id:'stock',     label:'Alertas de stock',icon:'📦' },
-  { id:'forecast',  label:'Pronóstico',       icon:'🔮' },
+  { id:'dashboard', label:'Dashboard',        icon:'📊' },
+  { id:'stock',     label:'Alertas de stock', icon:'📦' },
+  { id:'forecast',  label:'Pronóstico',        icon:'🔮' },
+  { id:'transit',   label:'En tránsito',       icon:'🚢' },
 ];
+
+/* ══════════════════════════════════════════════════════════════
+   TRÁNSITO — pedidos realizados pero no en Odoo aún
+══════════════════════════════════════════════════════════════ */
+function Transit() {
+  const { data: forecastData } = useApi('/api/forecast');
+  const [orders,    setOrders]    = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [showForm,  setShowForm]  = useState(false);
+  const [expanded,  setExpanded]  = useState({});
+  const [form,      setForm]      = useState({ ref:'', supplier:'', order_date: new Date().toISOString().slice(0,10), expected_arrival:'' });
+  const [lines,        setLines]        = useState([]);
+  const [pSearch,      setPSearch]      = useState('');
+  const [editingOrder,    setEditingOrder]    = useState(null);
+  const [supplierFilter,  setSupplierFilter]  = useState('all');
+  const readOnly = useReadOnly();
+  const allProducts = forecastData?.products || [];
+
+  // Price lookup: product_id → vendor_price (or avg_price as fallback)
+  const priceMap = useMemo(() => {
+    const m = {};
+    allProducts.forEach(p => { m[p.product_id] = p.vendor_price || p.avg_price || 0; });
+    return m;
+  }, [allProducts]);
+
+  const suppliers = useMemo(() => {
+    const s = new Set(orders.map(o => o.supplier).filter(Boolean));
+    return [...s].sort();
+  }, [orders]);
+
+  const loadOrders = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/transit');
+      const j = await r.json();
+      // Sort by expected_arrival ascending; orders without date go to the end
+      const sorted = (j.orders || []).sort((a, b) => {
+        if (!a.expected_arrival && !b.expected_arrival) return 0;
+        if (!a.expected_arrival) return 1;
+        if (!b.expected_arrival) return -1;
+        return a.expected_arrival.localeCompare(b.expected_arrival);
+      });
+      setOrders(sorted);
+    } catch(e) {}
+    setLoading(false);
+  };
+  useEffect(() => { loadOrders(); }, []);
+
+  const deleteOrder = async (id) => {
+    if (!window.confirm('¿Eliminar este pedido y todas sus líneas?')) return;
+    await fetch(`/api/transit/${id}`, { method:'DELETE' });
+    loadOrders();
+  };
+  const deleteLine = async (orderId, lineId) => {
+    await fetch(`/api/transit/${orderId}/lines/${lineId}`, { method:'DELETE' });
+    loadOrders();
+  };
+  const addLine = (product) => {
+    if (lines.find(l => l.product_id === product.product_id)) return;
+    setLines(prev => [...prev, { product_id: product.product_id, product_name: product.product_name, qty: product.suggested_qty || 1 }]);
+    setPSearch('');
+  };
+  const saveOrder = async () => {
+    if (!form.ref || lines.length === 0) return;
+    if (editingOrder) {
+      await fetch(`/api/transit/${editingOrder.id}`, {
+        method:'PATCH',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ ...form, lines }),
+      });
+    } else {
+      await fetch('/api/transit', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ ...form, lines }),
+      });
+    }
+    resetForm();
+    loadOrders();
+  };
+
+  // Unique vendors from forecast products for the supplier dropdown
+  const vendorOptions = useMemo(() => {
+    const vs = new Set(allProducts.map(p => p.vendor).filter(Boolean));
+    return [...vs].sort();
+  }, [allProducts]);
+
+  const filteredProducts = useMemo(() => {
+    if (!pSearch || pSearch.length < 2) return [];
+    const byVendor = form.supplier
+      ? allProducts.filter(p => p.vendor === form.supplier)
+      : allProducts;
+    const q = pSearch.toLowerCase();
+    return byVendor.filter(p =>
+      p.product_name.toLowerCase().includes(q) || (p.old_sku||'').toLowerCase().includes(q)
+    ).slice(0, 12);
+  }, [allProducts, pSearch, form.supplier]);
+
+  const totalUnits = orders.reduce((a, o) => a + o.lines.reduce((b, l) => b + l.qty, 0), 0);
+  const totalLines = orders.reduce((a, o) => a + o.lines.length, 0);
+
+  const resetForm = () => {
+    setShowForm(false);
+    setEditingOrder(null);
+    setLines([]);
+    setImportPreview(null);
+    setForm({ ref:'', supplier:'', order_date: new Date().toISOString().slice(0,10), expected_arrival:'' });
+    setPSearch('');
+  };
+
+  const startEdit = (order) => {
+    setEditingOrder(order);
+    setForm({
+      ref:              order.ref || '',
+      supplier:         order.supplier || '',
+      order_date:       order.order_date || '',
+      expected_arrival: order.expected_arrival || '',
+    });
+    setLines(order.lines.map(l => ({ ...l })));
+    setImportPreview(null);
+    setShowForm(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // ── Excel export ────────────────────────────────────────────────────────────
+  const exportTransitExcel = () => {
+    const XLSX = window.XLSX;
+    if (!XLSX) return alert('SheetJS no cargado');
+    const rows = [['Referencia', 'Proveedor', 'Fecha Pedido', 'Llegada Estimada', 'Producto', 'Uds en tránsito']];
+    orders.forEach(o => {
+      o.lines.forEach((l, i) => {
+        rows.push([
+          i === 0 ? o.ref : '',
+          i === 0 ? (o.supplier || '') : '',
+          i === 0 ? (o.order_date || '') : '',
+          i === 0 ? (o.expected_arrival || '') : '',
+          l.product_name,
+          l.qty,
+        ]);
+      });
+      rows.push(['', '', '', '', '', '']); // blank row between orders
+    });
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [20,20,14,16,40,12].map(w => ({ wch: w }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'En tránsito');
+    XLSX.writeFile(wb, `transito_${new Date().toISOString().slice(0,10)}.xlsx`);
+  };
+
+  // ── Excel import ────────────────────────────────────────────────────────────
+  const [transitSearch, setTransitSearch] = useState('');
+  const [importPreview, setImportPreview] = useState(null); // { lines, unmatched }
+  const importExcel = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const XLSX = window.XLSX;
+        const wb   = XLSX.read(ev.target.result, { type:'array' });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'' });
+        // Skip header row; skip TOTAL row (col 0 === 'TOTAL')
+        const dataRows = rows.slice(1).filter(r => r[0] && r[0] !== 'TOTAL');
+        const matched = [], unmatched = [];
+        dataRows.forEach(r => {
+          const rawQty = parseFloat(String(r[19]).replace(',','.')) || 0;
+          if (rawQty <= 0) return;
+          const name = String(r[0] || '').trim();
+          const sku  = String(r[1] || '').trim();
+          // Match by name or SKU against forecast products
+          const found = allProducts.find(p =>
+            p.product_name === name ||
+            (sku && p.old_sku && p.old_sku.toLowerCase() === sku.toLowerCase())
+          );
+          if (found) {
+            matched.push({ product_id: found.product_id, product_name: found.product_name, qty: rawQty });
+          } else {
+            unmatched.push({ name, sku, qty: rawQty });
+          }
+        });
+        if (matched.length === 0 && unmatched.length === 0) {
+          alert('No se encontraron filas con "Cantidad a comprar" > 0.\nRellena esa columna en el Excel antes de importar.');
+          return;
+        }
+        setImportPreview({ lines: matched, unmatched });
+        setShowForm(true);
+        setLines(matched);
+      } catch(err) {
+        alert('Error leyendo el Excel: ' + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = '';
+  };
+
+  return (
+    <div className="fade space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-white">🚢 Pedidos en tránsito</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Pedidos ya realizados pero pendientes de entrar en Odoo
+            {orders.length > 0 && (() => {
+              const totalVal = orders.reduce((a,o) => a + o.lines.reduce((b,l) => b + l.qty*(priceMap[l.product_id]||0), 0), 0);
+              return ` · ${orders.length} pedido${orders.length>1?'s':''} · ${num(totalLines,0)} referencias · ${num(totalUnits,0)} uds · ${totalVal > 0 ? money(totalVal) : ''}`;
+            })()}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {orders.length > 0 && (
+            <button onClick={exportTransitExcel}
+              className="px-4 py-2 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 font-semibold transition-colors flex items-center gap-1.5">
+              📤 Exportar Excel
+            </button>
+          )}
+          {!readOnly && <>
+            <label className={`px-4 py-2 rounded-lg text-sm bg-emerald-700 hover:bg-emerald-600 text-white font-semibold transition-colors cursor-pointer ${showForm ? 'opacity-40 pointer-events-none' : ''}`}
+              title="Importa el Excel del Pronóstico con la columna 'Cantidad a comprar' rellena">
+              📥 Importar Excel
+              <input type="file" accept=".xlsx,.xls" className="hidden" onChange={importExcel} />
+            </label>
+            <button onClick={() => { setImportPreview(null); setShowForm(true); }} disabled={showForm}
+              className="px-4 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-semibold transition-colors">
+              + Nuevo pedido
+            </button>
+          </>}
+        </div>
+      </div>
+
+      {/* Search + supplier filter */}
+      {!showForm && orders.length > 0 && (
+        <div className="flex items-center gap-3 flex-wrap">
+          <input type="text" value={transitSearch} onChange={e => setTransitSearch(e.target.value)}
+            placeholder="Buscar producto en pedidos en tránsito…"
+            className="w-full max-w-sm px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+          {suppliers.length > 0 && (
+            <select value={supplierFilter} onChange={e => setSupplierFilter(e.target.value)}
+              className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer">
+              <option value="all">Todas las fábricas ({orders.length})</option>
+              {suppliers.map(s => <option key={s} value={s}>{s} ({orders.filter(o=>o.supplier===s).length})</option>)}
+            </select>
+          )}
+          {(transitSearch || supplierFilter !== 'all') && (
+            <button onClick={() => { setTransitSearch(''); setSupplierFilter('all'); }}
+              className="text-xs text-gray-500 hover:text-gray-300">✕ Limpiar filtros</button>
+          )}
+        </div>
+      )}
+
+      {/* New order form */}
+      {showForm && (
+        <div className="bg-gray-900 border border-indigo-700/50 rounded-xl p-4 space-y-4 fade">
+          <h3 className="text-sm font-semibold text-indigo-300">
+            {editingOrder ? `✏️ Editando pedido: ${editingOrder.ref}` : 'Nuevo pedido en tránsito'}
+          </h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {/* Referencia */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Referencia *</label>
+              <input type="text" value={form.ref} placeholder="PO-2026-001"
+                onChange={e => setForm(f => ({...f, ref: e.target.value}))}
+                className="w-full px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-indigo-500" />
+            </div>
+            {/* Proveedor / Fábrica — selector */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Proveedor / Fábrica</label>
+              <select value={form.supplier}
+                onChange={e => { setForm(f => ({...f, supplier: e.target.value})); if (!editingOrder) setLines([]); setPSearch(''); }}
+                className="w-full px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer">
+                <option value="">— Selecciona fábrica —</option>
+                {vendorOptions.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </div>
+            {/* Fecha pedido */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Fecha pedido</label>
+              <input type="date" value={form.order_date}
+                onChange={e => setForm(f => ({...f, order_date: e.target.value}))}
+                className="w-full px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-indigo-500" />
+            </div>
+            {/* Llegada estimada */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Llegada estimada (mes)</label>
+              <input type="month" value={form.expected_arrival}
+                onChange={e => setForm(f => ({...f, expected_arrival: e.target.value}))}
+                className="w-full px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+
+          {/* Product search */}
+          <div className="relative">
+            <label className="text-xs text-gray-400 block mb-1">
+              Añadir productos
+              {form.supplier && <span className="ml-1 text-indigo-400">— {form.supplier}</span>}
+            </label>
+            <input value={pSearch} onChange={e => setPSearch(e.target.value)}
+              placeholder={form.supplier ? `Buscar en ${form.supplier}…` : 'Selecciona primero una fábrica…'}
+              disabled={!form.supplier}
+              className="w-full px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed" />
+            {filteredProducts.length > 0 && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl z-30 divide-y divide-gray-700/50 max-h-52 overflow-y-auto">
+                {filteredProducts.map(p => (
+                  <button key={p.product_id} onClick={() => addLine(p)}
+                    className="w-full text-left px-3 py-2 hover:bg-gray-700/60 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs text-gray-200 truncate">{p.product_name}</p>
+                      <p className="text-xs text-gray-500">{p.old_sku} · {p.brand_name}</p>
+                    </div>
+                    <span className="text-xs text-indigo-400 shrink-0">+ añadir</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Lines table */}
+          {lines.length > 0 && (
+            <div className="bg-gray-800/50 rounded-lg overflow-hidden">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-gray-700">
+                    <th className="px-3 py-2 text-left text-gray-400 font-medium">Producto</th>
+                    <th className="px-3 py-2 text-right text-gray-400 font-medium w-32">Cantidad (uds)</th>
+                    <th className="px-3 py-2 w-8"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-700/50">
+                  {lines.map(l => (
+                    <tr key={l.product_id}>
+                      <td className="px-3 py-2 text-gray-200">{l.product_name}</td>
+                      <td className="px-3 py-2">
+                        <input type="number" min="0" value={l.qty}
+                          onChange={e => setLines(prev => prev.map(x => x.product_id===l.product_id ? {...x, qty: parseFloat(e.target.value)||0} : x))}
+                          className="w-full px-2 py-1 rounded text-right bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-indigo-500" />
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        <button onClick={() => setLines(prev => prev.filter(x => x.product_id !== l.product_id))}
+                          className="text-gray-600 hover:text-red-400 transition-colors">✕</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Unmatched rows warning (only after Excel import) */}
+          {importPreview?.unmatched?.length > 0 && (
+            <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg px-3 py-2.5">
+              <p className="text-xs text-amber-400 font-medium mb-1">⚠️ {importPreview.unmatched.length} fila{importPreview.unmatched.length>1?'s':''} no identificada{importPreview.unmatched.length>1?'s':''} (producto no encontrado en el pronóstico):</p>
+              <ul className="text-xs text-amber-300/70 space-y-0.5 list-disc list-inside">
+                {importPreview.unmatched.map((u,i) => (
+                  <li key={i}>{u.name || u.sku || '?'} — {num(u.qty,0)} uds</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 justify-between">
+            <p className="text-xs text-gray-600">{lines.length} producto{lines.length!==1?'s':''} · {num(lines.reduce((a,l)=>a+l.qty,0),0)} uds</p>
+            <div className="flex gap-2">
+              <button onClick={resetForm}
+                className="px-4 py-1.5 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                Cancelar
+              </button>
+              <button onClick={saveOrder} disabled={!form.ref || lines.length === 0}
+                className="px-4 py-1.5 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold transition-colors">
+                {editingOrder ? '💾 Guardar cambios' : '💾 Guardar pedido'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Orders list */}
+      {loading ? (
+        <div className="space-y-2">{[1,2,3].map(i => <Sk key={i} h="h-16" />)}</div>
+      ) : orders.length === 0 ? (
+        <div className="text-center py-24 text-gray-600 fade">
+          <p className="text-5xl mb-4">🚢</p>
+          <p className="text-sm font-medium text-gray-500">No hay pedidos en tránsito registrados</p>
+          <p className="text-xs mt-1">Añade pedidos ya realizados que aún no están en Odoo.<br/>Se tendrán en cuenta en el pronóstico automáticamente.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {(() => {
+            const q = transitSearch.toLowerCase().trim();
+            const visibleOrders = orders
+              .filter(o => supplierFilter === 'all' || o.supplier === supplierFilter)
+              .filter(o => !q || o.lines.some(l => l.product_name.toLowerCase().includes(q)));
+            if (q && visibleOrders.length === 0) return (
+              <div className="text-center py-12 text-gray-600 fade">
+                <p className="text-3xl mb-2">🔍</p>
+                <p className="text-sm">Ningún pedido contiene "<span className="text-gray-400">{transitSearch}</span>"</p>
+              </div>
+            );
+            const now2 = new Date();
+            const hz2  = new Date(now2.getFullYear(), now2.getMonth() + 5, 1);
+            const horizonStr2 = `${hz2.getFullYear()}-${String(hz2.getMonth()+1).padStart(2,'0')}`;
+            return visibleOrders.map(order => {
+            const isOpen  = q ? true : !!expanded[order.id];
+            const totalQty   = order.lines.reduce((a, l) => a + l.qty, 0);
+            const totalValue = order.lines.reduce((a, l) => a + l.qty * (priceMap[l.product_id] || 0), 0);
+            const matchingLines = q ? order.lines.filter(l => l.product_name.toLowerCase().includes(q)) : null;
+            const countsInForecast = !order.expected_arrival || order.expected_arrival < horizonStr2;
+            return (
+              <div key={order.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade">
+                {/* Order header */}
+                <div className="px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-gray-800/30 transition-colors"
+                  onClick={() => setExpanded(e => ({...e, [order.id]: !e[order.id]}))}>
+                  <span className="text-gray-500 text-xs w-3 shrink-0">{isOpen ? '▼' : '▶'}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-white">{order.ref}</span>
+                      {order.supplier && (
+                        <span className="text-xs text-gray-300 bg-gray-800 border border-gray-700 px-2 py-0.5 rounded">
+                          {order.supplier}
+                        </span>
+                      )}
+                      {order.order_date && <span className="text-xs text-gray-600">{order.order_date}</span>}
+                      {order.expected_arrival && (
+                        <span className="text-xs text-amber-400 bg-amber-900/30 border border-amber-800/50 px-2 py-0.5 rounded">
+                          📅 Llegada: {order.expected_arrival}
+                        </span>
+                      )}
+                      {countsInForecast
+                        ? <span className="text-xs text-emerald-400 bg-emerald-900/30 border border-emerald-800/50 px-2 py-0.5 rounded" title="Este pedido llega dentro del horizonte de 5 meses y reduce la cantidad sugerida">✓ Cuenta en pronóstico</span>
+                        : <span className="text-xs text-gray-500 bg-gray-800/60 border border-gray-700/50 px-2 py-0.5 rounded" title="Este pedido llega fuera del horizonte de 5 meses — no afecta a la cantidad sugerida actual">⏱ Fuera del horizonte 5m</span>
+                      }
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {order.lines.length} producto{order.lines.length!==1?'s':''} · <span className="text-amber-400 font-semibold">{num(totalQty,0)} uds en camino</span>
+                      {totalValue > 0 && <span className="ml-2 text-emerald-400 font-semibold">· {money(totalValue)}</span>}
+                    </p>
+                  </div>
+                  {!readOnly && (
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={e => { e.stopPropagation(); startEdit(order); }}
+                      disabled={showForm}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-indigo-900/30 border border-indigo-700/50 text-indigo-400 hover:bg-indigo-900/60 disabled:opacity-40 transition-colors flex items-center gap-1">
+                      ✏️ Editar
+                    </button>
+                    <button onClick={e => { e.stopPropagation(); deleteOrder(order.id); }}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-red-900/30 border border-red-800/50 text-red-400 hover:bg-red-900/60 transition-colors flex items-center gap-1">
+                      🗑️ Eliminar
+                    </button>
+                  </div>
+                  )}
+                </div>
+
+                {/* Lines */}
+                {isOpen && (
+                  <div className="border-t border-gray-800 fade">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-gray-800 bg-gray-800/30">
+                          <th className="px-4 py-2 text-left text-gray-400 font-medium">Producto</th>
+                          <th className="px-4 py-2 text-right text-gray-400 font-medium">Uds</th>
+                          <th className="px-4 py-2 text-right text-gray-400 font-medium">Precio u.</th>
+                          <th className="px-4 py-2 text-right text-gray-400 font-medium">Subtotal</th>
+                          {!readOnly && <th className="px-4 py-2 w-10 text-center text-gray-600 font-normal">Quitar</th>}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800/50">
+                        {order.lines.map(line => {
+                          const isMatch = matchingLines && matchingLines.some(l => l.id === line.id);
+                          const dimmed  = matchingLines && !isMatch;
+                          return (
+                            <tr key={line.id} className={`transition-colors ${dimmed ? 'opacity-25' : 'hover:bg-gray-800/20'} ${isMatch ? 'bg-indigo-950/40' : ''}`}>
+                              <td className="px-4 py-2.5 text-gray-200">{line.product_name}</td>
+                              <td className="px-4 py-2.5 text-right text-amber-400 font-semibold">🚢 +{num(line.qty,0)}</td>
+                              <td className="px-4 py-2.5 text-right text-xs text-gray-400">{priceMap[line.product_id] ? money(priceMap[line.product_id]) : '—'}</td>
+                              <td className="px-4 py-2.5 text-right text-xs font-semibold text-emerald-400">{priceMap[line.product_id] ? money(line.qty * priceMap[line.product_id]) : '—'}</td>
+                              {!readOnly && (
+                              <td className="px-4 py-2.5 text-center">
+                                <button onClick={() => deleteLine(order.id, line.id)}
+                                  className="text-gray-600 hover:text-red-400 transition-colors px-1">✕</button>
+                              </td>
+                              )}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          });
+          })()}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function UrgentBadge() {
   const { data } = useApi('/api/forecast');
@@ -1351,11 +2014,31 @@ function UrgentBadge() {
 
 function App() {
   const [tab, setTab] = useState('dashboard');
+  const [dark, setDark] = useState(() => localStorage.getItem('theme') !== 'light');
+
+  useEffect(() => {
+    const html = document.documentElement;
+    if (dark) { html.classList.remove('light'); html.classList.add('dark'); }
+    else       { html.classList.remove('dark');  html.classList.add('light'); }
+    localStorage.setItem('theme', dark ? 'dark' : 'light');
+  }, [dark]);
+
+  const bg      = dark ? '#030712' : '#f1f5f9';
+  const panelBg = dark ? '#0f172a' : '#ffffff';
+
   return (
-    <div className="min-h-screen flex flex-col" style={{background:'#030712'}}>
+    <ThemeCtx.Provider value={dark}>
+    <ReadOnlyCtx.Provider value={IS_READONLY}>
+    <div className="min-h-screen flex flex-col" style={{background: bg}}>
+      {/* Read-only banner */}
+      {IS_READONLY && (
+        <div className="bg-amber-600/90 text-amber-950 text-xs font-semibold text-center py-1.5 px-4">
+          👁️ Modo solo lectura — vista de consulta
+        </div>
+      )}
       {/* Header */}
       <header className="border-b border-gray-800 px-5 py-3 flex items-center justify-between sticky top-0 z-10"
-        style={{background:'#0f172a'}}>
+        style={{background: panelBg}}>
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-lg">🛒</div>
           <div>
@@ -1363,11 +2046,19 @@ function App() {
             <p className="text-xs text-gray-500 leading-tight">v16 · Análisis de compras</p>
           </div>
         </div>
-        <Status />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setDark(d => !d)}
+            title={dark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-base transition-colors hover:bg-gray-800 text-gray-400 hover:text-gray-200">
+            {dark ? '☀️' : '🌙'}
+          </button>
+          <Status />
+        </div>
       </header>
 
       {/* Tabs */}
-      <nav className="border-b border-gray-800 px-5 flex gap-1" style={{background:'#0f172a'}}>
+      <nav className="border-b border-gray-800 px-5 flex gap-1" style={{background: panelBg}}>
         {TABS.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)}
             className={`px-4 py-3 text-sm font-medium flex items-center gap-1.5 border-b-2 transition-colors
@@ -1383,8 +2074,11 @@ function App() {
         {tab==='dashboard' && <Dashboard />}
         {tab==='stock'     && <StockAlerts />}
         {tab==='forecast'  && <Forecast />}
+        {tab==='transit'   && <Transit />}
       </main>
     </div>
+    </ReadOnlyCtx.Provider>
+    </ThemeCtx.Provider>
   );
 }
 

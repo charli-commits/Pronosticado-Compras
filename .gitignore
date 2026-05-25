@@ -1,6 +1,9 @@
 # Credentials — NEVER commit
 .env
 
+# Local transit orders (now stored in Supabase)
+transit_orders.json
+
 # Python
 venv/
 __pycache__/

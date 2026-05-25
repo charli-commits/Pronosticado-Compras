@@ -1,15 +1,18 @@
+import json
 import os
 import time
+import uuid
 import requests
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from supabase import create_client, Client
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -41,9 +44,22 @@ LOCATIONS = [
 # Primary stock location for forecast calculations (ESBO/Stock only)
 STOCK_LOCATION_ID = 12
 
-FORECAST_LEAD_MONTHS   = 6    # container lead time
+# Local file for transit orders (pedidos realizados pero no en Odoo aún)
+TRANSIT_FILE = os.path.join(BASE_DIR, "transit_orders.json")
+
+FORECAST_LEAD_MONTHS   = 5    # container lead time
 FORECAST_SMOOTHING_ALPHA = 0.3  # exponential smoothing factor
 CACHE_TTL_SECONDS      = 300  # 5 minutes
+
+# Read-only share link token (set VIEW_TOKEN in .env to enable)
+VIEW_TOKEN = os.getenv("VIEW_TOKEN", "")
+
+# Supabase client for transit orders persistence
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+_supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
+    _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
@@ -329,6 +345,121 @@ def fetch_stock(product_ids: list[int]) -> dict[int, dict]:
     }
 
 
+def fetch_bom_component_ids(product_ids: list[int]) -> set[int]:
+    """
+    Returns product_ids to exclude from forecast.
+    Rules:
+    - Exclude products that are BoM components of a non-PACK parent
+    - Never exclude a product that is itself a BoM parent (purchasable kit)
+    - Never exclude components of PACK BoMs (those are individual purchasable products)
+    """
+    try:
+        # 1. Find all BoM lines where our products appear as components
+        all_lines = odoo(
+            "mrp.bom.line", "search_read",
+            domain=[["product_id", "in", product_ids]],
+            fields=["product_id", "bom_id"],
+            limit=len(product_ids) * 5,
+        )
+        if not all_lines:
+            return set()
+
+        all_bom_ids = list({l["bom_id"][0] for l in all_lines if l.get("bom_id")})
+
+        # 2. Find which BoMs have a "separable" parent — components stay visible.
+        #    PACK = bundles sold individually; DISC = disc sets (RP60, RP80… RP500, RP1000)
+        #    "DISC" also matches "DISCOS" and "DISCS" via ilike substring.
+        #    Odoo OR domain (Polish notation): [id_filter, "|", cond1, cond2]
+        separable_boms = odoo(
+            "mrp.bom", "search_read",
+            domain=[
+                ["id", "in", all_bom_ids],
+                "|",
+                ["product_tmpl_id.name", "ilike", "PACK"],
+                ["product_tmpl_id.name", "ilike", "DISC"],
+            ],
+            fields=["id"],
+            limit=len(all_bom_ids) + 1,
+        )
+        pack_bom_ids = {b["id"] for b in separable_boms}
+
+        # 3. Candidates to exclude: components of non-separable BoMs
+        candidates = {
+            line["product_id"][0]
+            for line in all_lines
+            if line.get("product_id") and line["bom_id"][0] not in pack_bom_ids
+        }
+
+        # 4. Never exclude a product that is itself a BoM parent (it's a purchasable kit)
+        if candidates:
+            tmpl_ids_of_candidates = odoo(
+                "product.product", "search_read",
+                domain=[["id", "in", list(candidates)]],
+                fields=["id", "product_tmpl_id"],
+                limit=len(candidates) + 1,
+            )
+            tmpl_map = {r["id"]: r["product_tmpl_id"][0] for r in tmpl_ids_of_candidates if r.get("product_tmpl_id")}
+            parent_boms = odoo(
+                "mrp.bom", "search_read",
+                domain=[["product_tmpl_id", "in", list(tmpl_map.values())]],
+                fields=["product_tmpl_id"],
+                limit=len(tmpl_map) + 1,
+            )
+            bom_parent_tmpl_ids = {b["product_tmpl_id"][0] for b in parent_boms}
+            # Remove from candidates any product whose template has a BoM
+            candidates = {
+                pid for pid in candidates
+                if tmpl_map.get(pid) not in bom_parent_tmpl_ids
+            }
+
+        return candidates
+    except Exception:
+        return set()
+
+
+def fetch_kit_parent_ids(product_ids: list[int], tmpl_by_pid: dict[int, int]) -> set[int]:
+    """Returns the subset of product_ids that are kit parents (have a BoM in Odoo)."""
+    try:
+        tmpl_ids = [tmpl_by_pid[pid] for pid in product_ids if tmpl_by_pid.get(pid)]
+        if not tmpl_ids:
+            return set()
+        boms = odoo(
+            "mrp.bom", "search_read",
+            domain=[["product_tmpl_id", "in", tmpl_ids]],
+            fields=["product_id", "product_tmpl_id"],
+            limit=500,
+        )
+        # Build tmpl_id → [product_ids] reverse map
+        tmpl_to_pids: dict[int, list[int]] = {}
+        for pid in product_ids:
+            tmpl = tmpl_by_pid.get(pid)
+            if tmpl:
+                tmpl_to_pids.setdefault(tmpl, []).append(pid)
+
+        kit_ids: set[int] = set()
+        for bom in boms:
+            if bom.get("product_id"):
+                kit_ids.add(bom["product_id"][0])
+            else:
+                tmpl_id = bom["product_tmpl_id"][0]
+                kit_ids.update(tmpl_to_pids.get(tmpl_id, []))
+        return kit_ids & set(product_ids)
+    except Exception:
+        return set()
+
+
+def fetch_stock_odoo_native(product_ids: list[int]) -> dict[int, dict]:
+    """Uses Odoo's built-in computed stock fields — needed for kits where
+    stock lives on components and Odoo already aggregates it."""
+    rows = odoo(
+        "product.product", "search_read",
+        domain=[["id", "in", product_ids]],
+        fields=["id", "qty_available", "virtual_available", "incoming_qty", "outgoing_qty"],
+        limit=len(product_ids) + 1,
+    )
+    return {row["id"]: row for row in rows}
+
+
 def fetch_supplier_info(template_ids: list[int]) -> dict[int, dict]:
     """Returns primary supplier code + price keyed by product_tmpl_id."""
     rows = odoo(
@@ -368,6 +499,44 @@ def fetch_sales_by_product_12m(since: str) -> dict[int, float]:
     }
 
 
+# ── Transit orders (local JSON file) ─────────────────────────────────────────
+
+def read_transit() -> dict:
+    if _supabase:
+        try:
+            rows = _supabase.table("transit_orders").select("*").execute()
+            orders = sorted(rows.data or [], key=lambda o: o.get("expected_arrival") or "9999")
+            return {"orders": orders}
+        except Exception as e:
+            print(f"Supabase read error: {e}")
+    # Fallback to local file
+    if not os.path.exists(TRANSIT_FILE):
+        return {"orders": []}
+    try:
+        with open(TRANSIT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"orders": []}
+
+
+def write_transit(data: dict) -> None:
+    if _supabase:
+        try:
+            # Full replace: delete all + insert all
+            existing = _supabase.table("transit_orders").select("id").execute()
+            ids = [r["id"] for r in (existing.data or [])]
+            if ids:
+                _supabase.table("transit_orders").delete().in_("id", ids).execute()
+            if data.get("orders"):
+                _supabase.table("transit_orders").insert(data["orders"]).execute()
+            return
+        except Exception as e:
+            print(f"Supabase write error: {e}")
+    # Fallback to local file
+    with open(TRANSIT_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Odoo Purchasing Intelligence")
@@ -384,6 +553,13 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 
 @app.get("/")
 def index():
+    return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
+
+
+@app.get("/view/{token}")
+def view_readonly(token: str):
+    if not VIEW_TOKEN or token != VIEW_TOKEN:
+        raise HTTPException(status_code=403, detail="Link inválido o caducado")
     return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
 
 
@@ -552,6 +728,13 @@ def forecast():
         return {"products": [], "brands": TARGET_BRANDS}
 
     product_ids   = list(product_info.keys())
+
+    # Exclude products that are BoM components (child products of a kit)
+    bom_components = fetch_bom_component_ids(product_ids)
+    if bom_components:
+        product_ids  = [pid for pid in product_ids if pid not in bom_components]
+        product_info = {pid: info for pid, info in product_info.items() if pid not in bom_components}
+
     sales_history = fetch_sales_by_month(product_ids, since)
     vendor_votes, price_data = fetch_po_vendor_and_price(product_ids, since)
 
@@ -613,19 +796,33 @@ def forecast():
     results.sort(key=lambda x: x["total_forecast_qty"], reverse=True)
 
     # Enrich with live stock + supplier info
-    stock_map    = fetch_stock([r["product_id"] for r in results])
     tmpl_by_pid  = {pid: info["tmpl_id"] for pid, info in product_info.items() if info.get("tmpl_id")}
     supplier_map = fetch_supplier_info(list({t for t in tmpl_by_pid.values() if t}))
 
+    all_result_ids = [r["product_id"] for r in results]
+
+    # Identify kit parents — they get Odoo's native computed stock (already accounts for components)
+    # Regular products get our ESBO/Stock-filtered query
+    kit_ids    = fetch_kit_parent_ids(all_result_ids, tmpl_by_pid)
+    kit_ids_l  = list(kit_ids)
+    reg_ids    = [pid for pid in all_result_ids if pid not in kit_ids]
+
+    stock_map: dict[int, dict] = {}
+    if reg_ids:
+        stock_map.update(fetch_stock(reg_ids))
+    if kit_ids_l:
+        stock_map.update(fetch_stock_odoo_native(kit_ids_l))
+
     for record in results:
-        product_id   = record["product_id"]
-        stock        = stock_map.get(product_id, {})
+        product_id = record["product_id"]
+        stock = stock_map.get(product_id, {})
         virtual_stock = round(stock.get("virtual_available") or 0, 2)
 
         record["qty_available"]     = round(stock.get("qty_available")  or 0, 2)
         record["virtual_available"] = virtual_stock
         record["incoming_qty"]      = round(stock.get("incoming_qty")   or 0, 2)
         record["outgoing_qty"]      = round(stock.get("outgoing_qty")   or 0, 2)
+        record["is_kit"]            = product_id in kit_ids
 
         velocity = record["monthly_velocity"]
         record["coverage_months"] = round(virtual_stock / velocity, 1) if velocity > 0 else 99.0
@@ -642,6 +839,163 @@ def forecast():
     result = {"products": results, "brands": TARGET_BRANDS}
     cache_set("forecast", result)
     return result
+
+
+# ── Diagnostic route ─────────────────────────────────────────────────────────
+
+@app.get("/api/debug/missing")
+def debug_missing(q: str = ""):
+    """Search for products by name across ALL brands/states and explain why they may be missing."""
+    if not q or len(q) < 2:
+        raise HTTPException(status_code=400, detail="Parámetro ?q= requerido (mínimo 2 caracteres)")
+
+    # Search ALL products matching the name or SKU, including archived
+    # Use OR across name and old_sku fields
+    all_matches = _rpc("object", "execute_kw", [
+        ODOO_DB, _get_uid(), ODOO_PASSWORD,
+        "product.product", "search_read",
+        [["|", ["name", "ilike", q], ["old_sku", "ilike", q]]],
+        {
+            "fields": ["id", "display_name", "name", "product_brand_id", "active", "product_tmpl_id", "old_sku"],
+            "limit": 50,
+            "context": {"active_test": False},
+        }
+    ])
+
+    if not all_matches:
+        return {"query": q, "found": 0, "results": []}
+
+    product_ids  = [p["id"] for p in all_matches]
+    tmpl_ids     = [p["product_tmpl_id"][0] for p in all_matches if p.get("product_tmpl_id")]
+
+    # Check which are BoM components
+    bom_component_ids = fetch_bom_component_ids(product_ids)
+
+    # Check which are BoM parents
+    bom_parent_rows = odoo(
+        "mrp.bom", "search_read",
+        domain=[["product_tmpl_id", "in", tmpl_ids]],
+        fields=["product_tmpl_id", "product_id"],
+        limit=200,
+    ) if tmpl_ids else []
+    bom_parent_tmpl_ids = {b["product_tmpl_id"][0] for b in bom_parent_rows}
+
+    results = []
+    for p in all_matches:
+        brand_id   = p["product_brand_id"][0] if p.get("product_brand_id") else None
+        brand_name = p["product_brand_id"][1] if p.get("product_brand_id") else None
+        tmpl_id    = p["product_tmpl_id"][0]  if p.get("product_tmpl_id")  else None
+        active     = p.get("active", True)
+
+        reasons_missing = []
+        if not active:
+            reasons_missing.append("❌ Archivado en Odoo")
+        if brand_id not in TARGET_BRAND_IDS:
+            reasons_missing.append(f"❌ Marca '{brand_name}' (ID {brand_id}) no está en las marcas monitorizadas {TARGET_BRAND_IDS}")
+        if p["id"] in bom_component_ids:
+            reasons_missing.append("❌ Es componente de una lista de materiales (BoM) — excluido del pronóstico")
+        if tmpl_id in bom_parent_tmpl_ids:
+            reasons_missing.append("✅ Es producto padre de kit (BoM parent) — debería aparecer")
+
+        results.append({
+            "product_id":   p["id"],
+            "name":         p.get("display_name"),
+            "sku":          p.get("old_sku") or "",
+            "brand_id":     brand_id,
+            "brand_name":   brand_name,
+            "active":       active,
+            "is_bom_component": p["id"] in bom_component_ids,
+            "is_bom_parent":    tmpl_id in bom_parent_tmpl_ids,
+            "appears_in_forecast": (
+                active and
+                brand_id in TARGET_BRAND_IDS and
+                p["id"] not in bom_component_ids
+            ),
+            "reasons_missing": reasons_missing if reasons_missing else ["✅ Debería aparecer en el pronóstico"],
+        })
+
+    return {"query": q, "found": len(results), "results": results}
+
+
+# ── Transit order routes ──────────────────────────────────────────────────────
+
+@app.get("/api/transit")
+def transit_list():
+    return read_transit()
+
+
+@app.post("/api/transit")
+async def transit_create(request: Request):
+    body = await request.json()
+    data = read_transit()
+    new_order = {
+        "id":               str(uuid.uuid4()),
+        "ref":              body.get("ref", ""),
+        "supplier":         body.get("supplier", ""),
+        "order_date":       body.get("order_date", ""),
+        "expected_arrival": body.get("expected_arrival", ""),
+        "created_at":       datetime.now().isoformat(),
+        "lines": [
+            {
+                "id":           str(uuid.uuid4()),
+                "product_id":   line.get("product_id"),
+                "product_name": line.get("product_name", ""),
+                "qty":          float(line.get("qty", 0)),
+            }
+            for line in body.get("lines", [])
+        ],
+    }
+    data["orders"].append(new_order)
+    write_transit(data)
+    return new_order
+
+
+@app.patch("/api/transit/{order_id}")
+async def transit_update(order_id: str, request: Request):
+    body = await request.json()
+    data = read_transit()
+    for i, order in enumerate(data["orders"]):
+        if order["id"] == order_id:
+            data["orders"][i] = {
+                **order,
+                "ref":              body.get("ref", order.get("ref", "")),
+                "supplier":         body.get("supplier", order.get("supplier", "")),
+                "order_date":       body.get("order_date", order.get("order_date", "")),
+                "expected_arrival": body.get("expected_arrival", order.get("expected_arrival", "")),
+                "lines": [
+                    {
+                        "id":           line.get("id") or str(uuid.uuid4()),
+                        "product_id":   line.get("product_id"),
+                        "product_name": line.get("product_name", ""),
+                        "qty":          float(line.get("qty", 0)),
+                    }
+                    for line in body.get("lines", order.get("lines", []))
+                ],
+            }
+            write_transit(data)
+            return data["orders"][i]
+    raise HTTPException(status_code=404, detail="Pedido no encontrado")
+
+
+@app.delete("/api/transit/{order_id}")
+def transit_delete_order(order_id: str):
+    data = read_transit()
+    data["orders"] = [o for o in data["orders"] if o["id"] != order_id]
+    write_transit(data)
+    return {"deleted": order_id}
+
+
+@app.delete("/api/transit/{order_id}/lines/{line_id}")
+def transit_delete_line(order_id: str, line_id: str):
+    data = read_transit()
+    for order in data["orders"]:
+        if order["id"] == order_id:
+            order["lines"] = [l for l in order["lines"] if l["id"] != line_id]
+            if not order["lines"]:
+                data["orders"] = [o for o in data["orders"] if o["id"] != order_id]
+            break
+    write_transit(data)
+    return {"deleted": line_id}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
