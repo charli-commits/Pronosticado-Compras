@@ -745,8 +745,8 @@ def forecast():
         return cached
 
     now   = datetime.now()
-    since = (now - timedelta(days=365)).strftime("%Y-%m-%d")
-    timeline = build_months_timeline(now, n_months=12)
+    since = (now - timedelta(days=180)).strftime("%Y-%m-%d")
+    timeline = build_months_timeline(now, n_months=6)
 
     # Fetch all raw data from Odoo
     product_info  = fetch_product_variants(TARGET_BRAND_IDS)
