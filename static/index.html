@@ -670,8 +670,9 @@ function Forecast() {
     try {
       const linesToSave = quickAddLines.filter(l => (parseFloat(l.qty)||0) > 0);
       if (linesToSave.length === 0) { setQuickAddSaving(false); return; }
+      let res;
       if (quickAddForm.targetOrderId === 'new') {
-        await fetch('/api/transit', {
+        res = await fetch('/api/transit', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ ref: quickAddForm.ref, supplier: quickAddForm.supplier, order_date: quickAddForm.order_date, expected_arrival: quickAddForm.expected_arrival, lines: linesToSave }),
         });
@@ -682,15 +683,25 @@ function Forecast() {
         if (order) {
           const existingPids = new Set(order.lines.map(l => l.product_id));
           const merged = [...order.lines, ...linesToSave.filter(l => !existingPids.has(l.product_id))];
-          await fetch(`/api/transit/${order.id}`, {
+          res = await fetch(`/api/transit/${order.id}`, {
             method:'PATCH', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ ...order, lines: merged }),
           });
         }
       }
+      if (res && !res.ok) {
+        const errText = await res.text();
+        alert(`Error al guardar: ${res.status} — ${errText}`);
+        setQuickAddSaving(false);
+        return;
+      }
       setQuickAddModal(null);
       setSelectedPids(new Set());
-    } catch(e) {}
+      // Refresh transit data so the new order appears immediately
+      refreshTransit();
+    } catch(e) {
+      alert(`Error de red: ${e.message}`);
+    }
     setQuickAddSaving(false);
   };
   const [drafts,       setDrafts]       = useState(() => {
