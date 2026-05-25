@@ -1409,10 +1409,10 @@ function Forecast() {
                   <th className="px-3 py-2.5 text-right" title="Precio del proveedor preferido">Precio</th>
                   <th className="px-3 py-2.5 text-center text-emerald-400 w-28">Cant. compra</th>
                   <th className="px-3 py-2.5 text-right text-emerald-400">Total</th>
-                  {!readOnly && <th className="px-3 py-2.5 text-center w-8" title="Seleccionar todos">
+                  {!readOnly && <th className="px-3 py-2.5 text-center w-8" title="Seleccionar productos con cantidad > 0">
                     <input type="checkbox" className="accent-amber-500 cursor-pointer w-3.5 h-3.5"
-                      checked={filtered.length > 0 && filtered.every(p => selectedPids.has(p.product_id))}
-                      onChange={e => { if(e.target.checked) setSelectedPids(new Set(filtered.map(p=>p.product_id))); else setSelectedPids(new Set()); }} />
+                      checked={filtered.some(p => (parseFloat(quantities[p.product_id])||0) > 0 && selectedPids.has(p.product_id)) && filtered.filter(p => (parseFloat(quantities[p.product_id])||0) > 0).every(p => selectedPids.has(p.product_id))}
+                      onChange={e => { if(e.target.checked) setSelectedPids(new Set(filtered.filter(p=>(parseFloat(quantities[p.product_id])||0)>0).map(p=>p.product_id))); else setSelectedPids(new Set()); }} />
                   </th>}
                   <th className="px-3 py-2.5 text-center w-8"></th>
                 </tr>
