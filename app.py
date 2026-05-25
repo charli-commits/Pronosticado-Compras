@@ -541,13 +541,20 @@ def read_transit() -> dict:
 def write_transit(data: dict) -> None:
     if _supabase:
         try:
-            # Full replace: delete all + insert all
-            existing = _supabase.table("transit_orders").select("id").execute()
-            ids = [r["id"] for r in (existing.data or [])]
-            if ids:
-                _supabase.table("transit_orders").delete().in_("id", ids).execute()
-            if data.get("orders"):
-                _supabase.table("transit_orders").insert(data["orders"]).execute()
+            orders = data.get("orders") or []
+            if orders:
+                # Upsert current orders — safe: never deletes before confirming write
+                _supabase.table("transit_orders").upsert(orders, on_conflict="id").execute()
+                # Only delete rows that are no longer in the list
+                current_ids = {o["id"] for o in orders}
+                existing = _supabase.table("transit_orders").select("id").execute()
+                to_delete = [r["id"] for r in (existing.data or []) if r["id"] not in current_ids]
+            else:
+                # Empty list: delete everything
+                existing = _supabase.table("transit_orders").select("id").execute()
+                to_delete = [r["id"] for r in (existing.data or [])]
+            if to_delete:
+                _supabase.table("transit_orders").delete().in_("id", to_delete).execute()
             return
         except Exception as e:
             print(f"Supabase write error: {e}")
@@ -997,6 +1004,10 @@ async def transit_create(request: Request):
         "order_date":       body.get("order_date", ""),
         "expected_arrival": body.get("expected_arrival", ""),
         "created_at":       datetime.now().isoformat(),
+        "odoo_po":          "",
+        "containers":       [],
+        "status":           "active",
+        "actual_arrival":   "",
         "lines": [
             {
                 "id":           str(uuid.uuid4()),
