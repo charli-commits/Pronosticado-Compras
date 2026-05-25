@@ -1984,7 +1984,9 @@ function Transit() {
 
   // ── Excel import ────────────────────────────────────────────────────────────
   const [transitSearch, setTransitSearch] = useState('');
-  const [importPreview, setImportPreview] = useState(null); // { lines, unmatched }
+  const [importPreview, setImportPreview] = useState(null); // array of parsed orders
+  const [importSaving,  setImportSaving]  = useState(false);
+
   const importExcel = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1995,32 +1997,39 @@ function Transit() {
         const wb   = XLSX.read(ev.target.result, { type:'array' });
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'' });
-        // Skip header row; skip TOTAL row (col 0 === 'TOTAL')
-        const dataRows = rows.slice(1).filter(r => r[0] && r[0] !== 'TOTAL');
-        const matched = [], unmatched = [];
-        dataRows.forEach(r => {
-          const rawQty = parseFloat(String(r[19]).replace(',','.')) || 0;
-          if (rawQty <= 0) return;
-          const name = String(r[0] || '').trim();
-          const sku  = String(r[1] || '').trim();
-          // Match by name or SKU against forecast products
-          const found = allProducts.find(p =>
-            p.product_name === name ||
-            (sku && p.old_sku && p.old_sku.toLowerCase() === sku.toLowerCase())
-          );
-          if (found) {
-            matched.push({ product_id: found.product_id, product_name: found.product_name, qty: rawQty });
-          } else {
-            unmatched.push({ name, sku, qty: rawQty });
+        // Format: [Referencia, Proveedor, Fecha Pedido, Llegada Estimada, Producto, Old SKU, Ref. Proveedor, Uds Originales, Uds Pendientes]
+        // Col 0 only filled on first row of each order; empty rows separate orders
+        const parsed = [];
+        let cur = null;
+        rows.slice(1).forEach(r => {
+          const ref         = String(r[0] || '').trim();
+          const supplier    = String(r[1] || '').trim();
+          const orderDate   = String(r[2] || '').trim();
+          const arrival     = String(r[3] || '').trim();
+          const productName = String(r[4] || '').trim();
+          const oldSku      = String(r[5] || '').trim();
+          const qty         = parseFloat(String(r[7] || '0').replace(',','.')) || 0;
+          if (!productName) return; // empty separator row
+          if (ref) { // new order block
+            cur = { ref, supplier, order_date: orderDate, expected_arrival: arrival, lines: [] };
+            parsed.push(cur);
           }
+          if (!cur || qty <= 0) return;
+          const found = allProducts.find(p =>
+            p.product_name === productName ||
+            (oldSku && p.old_sku && p.old_sku.toLowerCase() === oldSku.toLowerCase())
+          );
+          cur.lines.push({
+            product_id:   found?.product_id || null,
+            product_name: productName,
+            qty,
+            price:        found ? (found.vendor_price || found.avg_price || 0) : 0,
+            matched:      !!found,
+          });
         });
-        if (matched.length === 0 && unmatched.length === 0) {
-          alert('No se encontraron filas con "Cantidad a comprar" > 0.\nRellena esa columna en el Excel antes de importar.');
-          return;
-        }
-        setImportPreview({ lines: matched, unmatched });
-        setShowForm(true);
-        setLines(matched);
+        const valid = parsed.filter(o => o.lines.length > 0);
+        if (valid.length === 0) return alert('No se encontraron pedidos con productos en el Excel.\nVerifica que el formato es el del Excel exportado desde esta misma web.');
+        setImportPreview(valid);
       } catch(err) {
         alert('Error leyendo el Excel: ' + err.message);
       }
@@ -2028,6 +2037,80 @@ function Transit() {
     reader.readAsArrayBuffer(file);
     e.target.value = '';
   };
+
+  const confirmImport = async () => {
+    if (!importPreview?.length) return;
+    setImportSaving(true);
+    try {
+      for (const order of importPreview) {
+        const linesToSave = order.lines.filter(l => l.product_id && l.qty > 0);
+        if (linesToSave.length === 0) continue;
+        const res = await fetch('/api/transit', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref: order.ref, supplier: order.supplier, order_date: order.order_date, expected_arrival: order.expected_arrival, lines: linesToSave }),
+        });
+        if (!res.ok) { alert(`Error creando "${order.ref}": ${await res.text()}`); break; }
+      }
+      setImportPreview(null);
+      loadOrders();
+    } catch(e) { alert('Error de red: ' + e.message); }
+    setImportSaving(false);
+  };
+
+  /* ── Import preview modal ─────────────────────────────────────────── */
+  if (importPreview) {
+    const totalOrders   = importPreview.length;
+    const totalProducts = importPreview.reduce((a,o) => a + o.lines.filter(l=>l.matched).length, 0);
+    const totalUnmatched= importPreview.reduce((a,o) => a + o.lines.filter(l=>!l.matched).length, 0);
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+        <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl">
+          <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between shrink-0">
+            <div>
+              <h3 className="text-white font-bold">📥 Vista previa de importación</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {totalOrders} pedido{totalOrders!==1?'s':''} · {totalProducts} producto{totalProducts!==1?'s':''} identificado{totalProducts!==1?'s':''}
+                {totalUnmatched > 0 && <span className="text-amber-400 ml-2">· ⚠️ {totalUnmatched} sin identificar (se omitirán)</span>}
+              </p>
+            </div>
+            <button onClick={() => setImportPreview(null)} className="text-gray-500 hover:text-white text-xl leading-none">×</button>
+          </div>
+          <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+            {importPreview.map((order, oi) => (
+              <div key={oi} className="bg-gray-800/50 border border-gray-700/50 rounded-xl p-3">
+                <div className="flex items-center gap-3 mb-2">
+                  <span className="text-sm font-semibold text-white">{order.ref}</span>
+                  {order.supplier && <span className="text-xs text-gray-400">{order.supplier}</span>}
+                  {order.order_date && <span className="text-xs text-gray-600">{order.order_date}</span>}
+                  {order.expected_arrival && <span className="text-xs text-amber-500">🚢 {order.expected_arrival}</span>}
+                </div>
+                <table className="w-full text-xs">
+                  <tbody>
+                    {order.lines.map((line, li) => (
+                      <tr key={li} className={`border-b border-gray-700/30 ${!line.matched ? 'opacity-40' : ''}`}>
+                        <td className="py-1 pr-3 text-gray-300 truncate max-w-xs" title={line.product_name}>
+                          {!line.matched && <span className="text-amber-500 mr-1" title="Producto no encontrado">⚠️</span>}
+                          {line.product_name}
+                        </td>
+                        <td className="py-1 text-right text-emerald-300 font-semibold w-20">{num(line.qty,0)} uds</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+          <div className="px-6 py-4 border-t border-gray-800 flex gap-3 justify-end shrink-0">
+            <button onClick={() => setImportPreview(null)} className="px-4 py-2 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700">Cancelar</button>
+            <button onClick={confirmImport} disabled={importSaving || totalProducts === 0}
+              className="px-4 py-2 rounded-lg text-sm bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold">
+              {importSaving ? '⏳ Importando...' : `✅ Importar ${totalOrders} pedido${totalOrders!==1?'s':''}`}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   /* ── Container modal ──────────────────────────────────────────────── */
   if (containerModal) {
@@ -2272,17 +2355,6 @@ function Transit() {
             </div>
           )}
 
-          {/* Unmatched rows warning (only after Excel import) */}
-          {importPreview?.unmatched?.length > 0 && (
-            <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg px-3 py-2.5">
-              <p className="text-xs text-amber-400 font-medium mb-1">⚠️ {importPreview.unmatched.length} fila{importPreview.unmatched.length>1?'s':''} no identificada{importPreview.unmatched.length>1?'s':''} (producto no encontrado en el pronóstico):</p>
-              <ul className="text-xs text-amber-300/70 space-y-0.5 list-disc list-inside">
-                {importPreview.unmatched.map((u,i) => (
-                  <li key={i}>{u.name || u.sku || '?'} — {num(u.qty,0)} uds</li>
-                ))}
-              </ul>
-            </div>
-          )}
 
           <div className="flex items-center gap-2 justify-between">
             <p className="text-xs text-gray-600">{lines.length} producto{lines.length!==1?'s':''} · {num(lines.reduce((a,l)=>a+l.qty,0),0)} uds</p>
