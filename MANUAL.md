@@ -236,3 +236,4 @@ En la esquina superior derecha aparece el estado de la conexión con Odoo:
 
 - **Auto-archivar tránsito** cuando la GCPO se confirme en Odoo.
 - **Notificaciones de llegada** por email/Slack cuando la fecha estimada se acerca.
+- **Pagos de contenedor (Container payments):** seguimiento de pagos asociados a cada GCPO/contenedor (depósito, saldo, fecha de pago, estado).
