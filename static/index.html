@@ -638,8 +638,14 @@ function Forecast() {
   });
 
   const openQuickAdd = async () => {
-    const selectedProducts = filtered.filter(p => selectedPids.has(p.product_id));
-    if (selectedProducts.length === 0) return;
+    // Only include products that have a quantity > 0 in "Cant. Compra"
+    const selectedProducts = filtered.filter(p =>
+      selectedPids.has(p.product_id) && (parseFloat(quantities[p.product_id]) || 0) > 0
+    );
+    if (selectedProducts.length === 0) {
+      alert('Ningún producto seleccionado tiene unidades en "Cant. Compra". Introduce las cantidades primero.');
+      return;
+    }
     const firstVendor = selectedProducts[0].vendor || '';
     let existing = [];
     try {
@@ -651,7 +657,7 @@ function Forecast() {
     setQuickAddLines(selectedProducts.map(p => ({
       product_id: p.product_id,
       product_name: p.product_name,
-      qty: parseFloat(quantities[p.product_id]) || p.suggested_qty || 1,
+      qty: parseFloat(quantities[p.product_id]),   // exact qty from input, no fallback
       price: p.vendor_price || p.avg_price || 0,
     })));
     setQuickAddForm({ ref:'', supplier: firstVendor, order_date: new Date().toISOString().slice(0,10), expected_arrival:'', targetOrderId:'new' });
@@ -662,10 +668,12 @@ function Forecast() {
     if (!quickAddForm.ref && quickAddForm.targetOrderId === 'new') return;
     setQuickAddSaving(true);
     try {
+      const linesToSave = quickAddLines.filter(l => (parseFloat(l.qty)||0) > 0);
+      if (linesToSave.length === 0) { setQuickAddSaving(false); return; }
       if (quickAddForm.targetOrderId === 'new') {
         await fetch('/api/transit', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ ref: quickAddForm.ref, supplier: quickAddForm.supplier, order_date: quickAddForm.order_date, expected_arrival: quickAddForm.expected_arrival, lines: quickAddLines }),
+          body: JSON.stringify({ ref: quickAddForm.ref, supplier: quickAddForm.supplier, order_date: quickAddForm.order_date, expected_arrival: quickAddForm.expected_arrival, lines: linesToSave }),
         });
       } else {
         const r = await fetch('/api/transit');
@@ -673,7 +681,7 @@ function Forecast() {
         const order = j.orders.find(o => o.id === quickAddForm.targetOrderId);
         if (order) {
           const existingPids = new Set(order.lines.map(l => l.product_id));
-          const merged = [...order.lines, ...quickAddLines.filter(l => !existingPids.has(l.product_id))];
+          const merged = [...order.lines, ...linesToSave.filter(l => !existingPids.has(l.product_id))];
           await fetch(`/api/transit/${order.id}`, {
             method:'PATCH', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ ...order, lines: merged }),
