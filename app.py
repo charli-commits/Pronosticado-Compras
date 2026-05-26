@@ -347,11 +347,11 @@ def fetch_stock(product_ids: list[int]) -> dict[int, dict]:
 
 def fetch_bom_parent_ids(product_ids: list[int]) -> set[int]:
     """
-    Returns product_ids that are BoM parents (kits/sets) — they should be
-    excluded from the forecast because their components are forecasted individually.
+    Returns product_ids that are true kits/sets (phantom BoM type) — excluded
+    from forecast because their components are forecasted individually.
+    Normal BoMs (machines shipped in multiple boxes) are NOT excluded.
     """
     try:
-        # Get product templates for our product IDs
         variants = odoo(
             "product.product", "search_read",
             domain=[["id", "in", product_ids]],
@@ -362,14 +362,18 @@ def fetch_bom_parent_ids(product_ids: list[int]) -> set[int]:
         if not tmpl_to_pid:
             return set()
 
-        # Find which templates have a BoM (i.e. are kits/sets)
-        boms = odoo(
+        # Only exclude phantom BoMs (kits/sets sold as bundles of independent products)
+        # Normal BoMs = machines assembled from parts → keep in forecast
+        phantom_boms = odoo(
             "mrp.bom", "search_read",
-            domain=[["product_tmpl_id", "in", list(tmpl_to_pid.keys())]],
+            domain=[
+                ["product_tmpl_id", "in", list(tmpl_to_pid.keys())],
+                ["type", "=", "phantom"],
+            ],
             fields=["product_tmpl_id"],
             limit=len(tmpl_to_pid) + 1,
         )
-        kit_tmpl_ids = {b["product_tmpl_id"][0] for b in boms}
+        kit_tmpl_ids = {b["product_tmpl_id"][0] for b in phantom_boms}
         return {tmpl_to_pid[t] for t in kit_tmpl_ids if t in tmpl_to_pid}
     except Exception:
         return set()
