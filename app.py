@@ -404,9 +404,11 @@ def fetch_bom_component_ids(product_ids: list[int]) -> set[int]:
             "mrp.bom", "search_read",
             domain=[
                 ["id", "in", all_bom_ids],
-                "|",
+                "|", "|", "|",
                 ["product_tmpl_id.name", "ilike", "PACK"],
                 ["product_tmpl_id.name", "ilike", "DISC"],
+                ["product_tmpl_id.name", "ilike", "SET"],
+                ["product_tmpl_id.name", "ilike", "RACK"],
             ],
             fields=["id"],
             limit=len(all_bom_ids) + 1,
