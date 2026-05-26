@@ -345,6 +345,36 @@ def fetch_stock(product_ids: list[int]) -> dict[int, dict]:
     }
 
 
+def fetch_bom_parent_ids(product_ids: list[int]) -> set[int]:
+    """
+    Returns product_ids that are BoM parents (kits/sets) — they should be
+    excluded from the forecast because their components are forecasted individually.
+    """
+    try:
+        # Get product templates for our product IDs
+        variants = odoo(
+            "product.product", "search_read",
+            domain=[["id", "in", product_ids]],
+            fields=["id", "product_tmpl_id"],
+            limit=len(product_ids) + 1,
+        )
+        tmpl_to_pid = {r["product_tmpl_id"][0]: r["id"] for r in variants if r.get("product_tmpl_id")}
+        if not tmpl_to_pid:
+            return set()
+
+        # Find which templates have a BoM (i.e. are kits/sets)
+        boms = odoo(
+            "mrp.bom", "search_read",
+            domain=[["product_tmpl_id", "in", list(tmpl_to_pid.keys())]],
+            fields=["product_tmpl_id"],
+            limit=len(tmpl_to_pid) + 1,
+        )
+        kit_tmpl_ids = {b["product_tmpl_id"][0] for b in boms}
+        return {tmpl_to_pid[t] for t in kit_tmpl_ids if t in tmpl_to_pid}
+    except Exception:
+        return set()
+
+
 def fetch_bom_component_ids(product_ids: list[int]) -> set[int]:
     """
     Returns product_ids to exclude from forecast.
@@ -755,11 +785,14 @@ def forecast():
 
     product_ids   = list(product_info.keys())
 
-    # Exclude products that are BoM components (child products of a kit)
+    # Exclude BoM components (child products of a kit)
     bom_components = fetch_bom_component_ids(product_ids)
-    if bom_components:
-        product_ids  = [pid for pid in product_ids if pid not in bom_components]
-        product_info = {pid: info for pid, info in product_info.items() if pid not in bom_components}
+    # Exclude BoM parents/kits (sets assembled from individual products)
+    bom_parents    = fetch_bom_parent_ids(product_ids)
+    excluded       = bom_components | bom_parents
+    if excluded:
+        product_ids  = [pid for pid in product_ids if pid not in excluded]
+        product_info = {pid: info for pid, info in product_info.items() if pid not in excluded}
 
     sales_history = fetch_sales_by_month(product_ids, since)
     vendor_votes, price_data = fetch_po_vendor_and_price(product_ids, since)
@@ -921,7 +954,7 @@ def debug_missing(q: str = ""):
         if p["id"] in bom_component_ids:
             reasons_missing.append("❌ Es componente de una lista de materiales (BoM) — excluido del pronóstico")
         if tmpl_id in bom_parent_tmpl_ids:
-            reasons_missing.append("✅ Es producto padre de kit (BoM parent) — debería aparecer")
+            reasons_missing.append("❌ Es kit/set (BoM parent) — excluido del pronóstico (sus componentes se pronostican individualmente)")
 
         results.append({
             "product_id":   p["id"],
@@ -935,7 +968,8 @@ def debug_missing(q: str = ""):
             "appears_in_forecast": (
                 active and
                 brand_id in TARGET_BRAND_IDS and
-                p["id"] not in bom_component_ids
+                p["id"] not in bom_component_ids and
+                tmpl_id not in bom_parent_tmpl_ids
             ),
             "reasons_missing": reasons_missing if reasons_missing else ["✅ Debería aparecer en el pronóstico"],
         })
