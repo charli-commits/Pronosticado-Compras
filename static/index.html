@@ -817,6 +817,9 @@ function Forecast() {
     if (sortBy === 'coverage') {
       list = [...list].sort((a, b) => a.coverage_months - b.coverage_months);
     }
+    if (sortBy === 'sku') {
+      list = [...list].sort((a, b) => (a.old_sku || a.display_name || '').localeCompare(b.old_sku || b.display_name || ''));
+    }
     if (urgencyFilter === 'no_movement') {
       list = [...list].sort((a, b) => (b.qty_available||0) - (a.qty_available||0));
     }
@@ -1378,16 +1381,17 @@ function Forecast() {
           </button>
           <div className="ml-auto flex items-center gap-1.5 text-xs text-gray-500">
             <span>Ordenar:</span>
-            <button onClick={() => setSortBy('coverage')}
-              className={`px-2.5 py-1 rounded-lg border transition-colors
-                ${sortBy==='coverage' ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-gray-700 text-gray-400 hover:bg-gray-800'}`}>
-              Cobertura ↑
-            </button>
-            <button onClick={() => setSortBy('forecast')}
-              className={`px-2.5 py-1 rounded-lg border transition-colors
-                ${sortBy==='forecast' ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-gray-700 text-gray-400 hover:bg-gray-800'}`}>
-              Volumen ↓
-            </button>
+            {[
+              { key: 'coverage', label: 'Cobertura ↑' },
+              { key: 'forecast', label: 'Volumen ↓'  },
+              { key: 'sku',      label: 'SKU A→Z'    },
+            ].map(opt => (
+              <button key={opt.key} onClick={() => setSortBy(opt.key)}
+                className={`px-2.5 py-1 rounded-lg border transition-colors
+                  ${sortBy===opt.key ? 'bg-indigo-600 border-indigo-500 text-white' : 'border-gray-700 text-gray-400 hover:bg-gray-800'}`}>
+                {opt.label}
+              </button>
+            ))}
           </div>
         </div>
       )}
