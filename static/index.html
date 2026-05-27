@@ -757,11 +757,20 @@ function Forecast() {
 
   // Vendors for the selected brand (sorted alphabetically)
   const vendorsForBrand = useMemo(() => {
-    const byBrand = products.filter(p => brandFilter === 'all' || p.brand_id === brandFilter);
+    // Only show vendors that have at least one product visible after all filters
+    // except the vendor filter itself (so switching vendor doesn't collapse the list)
+    const byBrand = products.filter(p => {
+      const brandOk  = brandFilter === 'all' || p.brand_id === brandFilter;
+      const searchOk = !search || (p.display_name||'').toLowerCase().includes(search.toLowerCase());
+      const newOk    = !newProductFilter || (p.create_date && p.create_date >= sixMonthsAgo);
+      if (!brandOk || !searchOk || !newOk) return false;
+      if (p.no_movement && !newProductFilter) return false;
+      return true;
+    });
     const seen = {};
     byBrand.forEach(p => { if (p.vendor && p.vendor !== '—') seen[p.vendor] = true; });
     return Object.keys(seen).sort();
-  }, [products, brandFilter]);
+  }, [products, brandFilter, search, newProductFilter, sixMonthsAgo]);
 
   // Reset vendor filter when brand changes
   const selectBrand = (bid) => { setBrandFilter(bid); setVendorFilter('all'); setExpandedPid(null); };
