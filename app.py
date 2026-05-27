@@ -271,6 +271,18 @@ def fetch_sales_by_month(product_ids: list[int], since: str) -> dict[int, dict[s
     return sales
 
 
+def normalize_vendor_name(name: str) -> str:
+    """
+    Odoo sometimes stores vendors as 'Company, Contact Name' when the PO was
+    created against a contact rather than the parent company.
+    Strip everything after the first comma so 'IFIT Health & Fitness France,
+    Juan Carlos Lucena' → 'IFIT Health & Fitness France'.
+    """
+    if not name:
+        return name
+    return name.split(",")[0].strip()
+
+
 def fetch_po_vendor_and_price(product_ids: list[int], since: str) -> tuple[dict, dict]:
     """Returns (vendor_votes_by_product, price_data_by_product) from PO history."""
     lines = odoo(
@@ -290,7 +302,7 @@ def fetch_po_vendor_and_price(product_ids: list[int], since: str) -> tuple[dict,
         fields=["id", "partner_id"],
         limit=len(order_ids) + 1,
     )
-    vendor_by_order = {o["id"]: o["partner_id"][1] for o in orders if o.get("partner_id")}
+    vendor_by_order = {o["id"]: normalize_vendor_name(o["partner_id"][1]) for o in orders if o.get("partner_id")}
 
     vendor_votes: dict = defaultdict(lambda: defaultdict(int))
     price_data:   dict = defaultdict(lambda: {"qty": 0.0, "amount": 0.0})
@@ -939,14 +951,14 @@ def dashboard():
         },
         "trend": monthly_trend(),
         "top_suppliers": [
-            {"name": r["partner_id"][1], "amount": round(r["amount_total"] or 0, 2)}
+            {"name": normalize_vendor_name(r["partner_id"][1]), "amount": round(r["amount_total"] or 0, 2)}
             for r in (top_suppliers_raw or [])
         ],
         "last_orders": [
             {
                 "id":       r["id"],
                 "name":     r["name"],
-                "supplier": r["partner_id"][1] if r.get("partner_id") else "—",
+                "supplier": normalize_vendor_name(r["partner_id"][1]) if r.get("partner_id") else "—",
                 "date":     (r.get("date_order") or "")[:10],
                 "amount":   round(r.get("amount_total") or 0, 2),
                 "currency": r["currency_id"][1] if r.get("currency_id") else "EUR",
