@@ -2,15 +2,19 @@ import json
 import os
 import time
 import uuid
+import smtplib
 import requests
+import jwt as _jwt
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from supabase import create_client, Client
 
@@ -84,6 +88,7 @@ def cache_clear(key: str) -> None:
 # ── Odoo JSON-RPC client ──────────────────────────────────────────────────────
 
 _session_uid: Optional[int] = None
+_odoo_company_id: Optional[int] = None
 
 
 def _rpc(service: str, method: str, args: list) -> dict:
@@ -122,6 +127,27 @@ def _get_uid() -> int:
             raise HTTPException(status_code=401, detail="Credenciales de Odoo inválidas")
         _session_uid = uid
     return _session_uid
+
+
+def _get_company_id() -> int:
+    """Fetch and cache the primary company ID from Odoo (needed for company_dependent fields)."""
+    global _odoo_company_id
+    if not _odoo_company_id:
+        try:
+            uid = _get_uid()
+            rows = _rpc("object", "execute_kw", [
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "res.users", "read",
+                [uid],
+                {"fields": ["company_id"]},
+            ])
+            if rows and rows[0].get("company_id"):
+                _odoo_company_id = rows[0]["company_id"][0]
+            else:
+                _odoo_company_id = 1  # fallback
+        except Exception:
+            _odoo_company_id = 1  # fallback
+    return _odoo_company_id
 
 
 def odoo(model: str, method: str, domain: list = None, fields: list = None, **kwargs) -> list:
@@ -197,16 +223,17 @@ def fetch_product_variants(brand_ids: list[int]) -> dict[int, dict]:
     rows = odoo(
         "product.product", "search_read",
         domain=[["product_brand_id", "in", brand_ids]],
-        fields=["id", "product_tmpl_id", "product_brand_id", "old_sku", "display_name"],
+        fields=["id", "product_tmpl_id", "product_brand_id", "old_sku", "display_name", "create_date"],
         limit=5000,
     )
     return {
         row["id"]: {
-            "brand_id":   row["product_brand_id"][0] if row.get("product_brand_id") else None,
-            "brand_name": row["product_brand_id"][1] if row.get("product_brand_id") else "Sin marca",
-            "old_sku":    row.get("old_sku") or "",
-            "name":       row.get("display_name") or "",
-            "tmpl_id":    row["product_tmpl_id"][0] if row.get("product_tmpl_id") else None,
+            "brand_id":    row["product_brand_id"][0] if row.get("product_brand_id") else None,
+            "brand_name":  row["product_brand_id"][1] if row.get("product_brand_id") else "Sin marca",
+            "old_sku":     row.get("old_sku") or "",
+            "name":        row.get("display_name") or "",
+            "tmpl_id":     row["product_tmpl_id"][0] if row.get("product_tmpl_id") else None,
+            "create_date": (row.get("create_date") or "")[:10],  # keep YYYY-MM-DD only
         }
         for row in rows
     }
@@ -347,10 +374,19 @@ def fetch_stock(product_ids: list[int]) -> dict[int, dict]:
 
 def fetch_bom_parent_ids(product_ids: list[int]) -> set[int]:
     """
-    Returns product_ids that are true kits/sets (phantom BoM type) — excluded
-    from forecast because their components are forecasted individually.
-    Normal BoMs (machines shipped in multiple boxes) are NOT excluded.
+    Returns product_ids that are true bundle-kits — excluded from forecast because
+    their components are forecasted individually.
+
+    Distinction:
+    - TRUE KIT/PACK  (exclude): phantom BoM whose parent product name contains
+      PACK, KIT, SET, BUNDLE, COMBO — e.g. "LG-PACK TITANIUM STRENGTH PACK PIERNAS"
+    - MACHINE IN BOXES (keep): phantom BoM used to split a single product into
+      shipping boxes — e.g. 150X comes in 3 boxes (150X-1/2/3).
+      These machines must be forecasted so you know how many to buy.
+
+    Normal (non-phantom) BoMs are never excluded.
     """
+    BUNDLE_KEYWORDS = ("PACK", "KIT", "SET", "BUNDLE", "COMBO")
     try:
         variants = odoo(
             "product.product", "search_read",
@@ -362,8 +398,7 @@ def fetch_bom_parent_ids(product_ids: list[int]) -> set[int]:
         if not tmpl_to_pid:
             return set()
 
-        # Only exclude phantom BoMs (kits/sets sold as bundles of independent products)
-        # Normal BoMs = machines assembled from parts → keep in forecast
+        # Find phantom BoMs for these templates
         phantom_boms = odoo(
             "mrp.bom", "search_read",
             domain=[
@@ -373,7 +408,23 @@ def fetch_bom_parent_ids(product_ids: list[int]) -> set[int]:
             fields=["product_tmpl_id"],
             limit=len(tmpl_to_pid) + 1,
         )
-        kit_tmpl_ids = {b["product_tmpl_id"][0] for b in phantom_boms}
+        if not phantom_boms:
+            return set()
+
+        # Only exclude if the product name indicates a true bundle/pack
+        phantom_tmpl_ids = [b["product_tmpl_id"][0] for b in phantom_boms]
+        tmpl_names = odoo(
+            "product.template", "search_read",
+            domain=[["id", "in", phantom_tmpl_ids]],
+            fields=["id", "name"],
+            limit=len(phantom_tmpl_ids) + 1,
+        )
+        tmpl_name_map = {r["id"]: (r.get("name") or "").upper() for r in tmpl_names}
+
+        kit_tmpl_ids = {
+            tmpl_id for tmpl_id in phantom_tmpl_ids
+            if any(kw in tmpl_name_map.get(tmpl_id, "") for kw in BUNDLE_KEYWORDS)
+        }
         return {tmpl_to_pid[t] for t in kit_tmpl_ids if t in tmpl_to_pid}
     except Exception:
         return set()
@@ -408,11 +459,10 @@ def fetch_bom_component_ids(product_ids: list[int]) -> set[int]:
             "mrp.bom", "search_read",
             domain=[
                 ["id", "in", all_bom_ids],
-                "|", "|", "|",
+                "|", "|",
                 ["product_tmpl_id.name", "ilike", "PACK"],
                 ["product_tmpl_id.name", "ilike", "DISC"],
                 ["product_tmpl_id.name", "ilike", "SET"],
-                ["product_tmpl_id.name", "ilike", "RACK"],
             ],
             fields=["id"],
             limit=len(all_bom_ids) + 1,
@@ -497,22 +547,130 @@ def fetch_stock_odoo_native(product_ids: list[int]) -> dict[int, dict]:
 
 
 def fetch_supplier_info(template_ids: list[int]) -> dict[int, dict]:
-    """Returns primary supplier code + price keyed by product_tmpl_id."""
-    rows = odoo(
+    """Returns primary supplier code and price keyed by product_tmpl_id."""
+    si_rows = odoo(
         "product.supplierinfo", "search_read",
         domain=[["product_tmpl_id", "in", template_ids]],
-        fields=["product_tmpl_id", "partner_id", "price", "product_code", "sequence"],
+        fields=["product_tmpl_id", "product_code", "price", "sequence"],
         order="sequence asc",
         limit=len(template_ids) * 3,
     )
-    result = {}
-    for row in rows:
+    vendor_codes:  dict[int, str]   = {}
+    vendor_prices: dict[int, float] = {}
+    for row in si_rows:
         tmpl_id = row["product_tmpl_id"][0]
-        if tmpl_id not in result:
-            result[tmpl_id] = {
-                "vendor_code":  row.get("product_code") or "",
-                "vendor_price": round(row.get("price") or 0, 4),
-            }
+        if tmpl_id not in vendor_codes:
+            vendor_codes[tmpl_id]  = row.get("product_code") or ""
+            vendor_prices[tmpl_id] = round(row.get("price") or 0, 4)
+    return {
+        tmpl_id: {
+            "vendor_code":  vendor_codes.get(tmpl_id, ""),
+            "vendor_price": vendor_prices.get(tmpl_id, 0.0),
+        }
+        for tmpl_id in template_ids
+    }
+
+
+def fetch_standard_prices(product_ids: list[int], tmpl_by_pid: dict[int, int] = None) -> dict[int, float]:
+    """Returns standard_price (cost, EUR) keyed by product.product id.
+
+    standard_price is a company_dependent field in Odoo v16. Without a company_id
+    in the RPC context, it always returns 0. We pass context={'company_id': X}
+    to get the real per-company value. If that fails (e.g. module override errors),
+    we retry without context as a safety fallback.
+
+    Read order:
+      1. product.product with company context  → variant-level cost
+      2. product.template with company context → template-level cost (for 0-variants)
+      3. ir.property direct read               → raw stored property (last resort)
+    """
+    company_id = _get_company_id()
+    ctx = {"company_id": company_id}
+
+    # ── Step 1: read variant-level standard_price with company context ──────────
+    result: dict[int, float] = {}
+    local_tmpl: dict[int, int] = {}
+    try:
+        rows = odoo(
+            "product.product", "search_read",
+            domain=[["id", "in", product_ids]],
+            fields=["id", "standard_price", "product_tmpl_id"],
+            limit=len(product_ids) + 1,
+            context=ctx,
+        )
+    except Exception:
+        # If company context causes error (e.g. stock_barcode override), retry without it
+        rows = odoo(
+            "product.product", "search_read",
+            domain=[["id", "in", product_ids]],
+            fields=["id", "standard_price", "product_tmpl_id"],
+            limit=len(product_ids) + 1,
+        )
+
+    for r in rows:
+        pid = r["id"]
+        result[pid] = round(r.get("standard_price") or 0, 4)
+        if r.get("product_tmpl_id"):
+            local_tmpl[pid] = r["product_tmpl_id"][0]
+
+    combined_tmpl = tmpl_by_pid or local_tmpl
+
+    # ── Step 2: for variants still at 0, try product.template with company context
+    zero_pids = [pid for pid in result if result[pid] == 0 and combined_tmpl.get(pid)]
+    if zero_pids:
+        zero_tmpl_ids = list({combined_tmpl[pid] for pid in zero_pids})
+        try:
+            tmpl_rows = odoo(
+                "product.template", "search_read",
+                domain=[["id", "in", zero_tmpl_ids]],
+                fields=["id", "standard_price"],
+                limit=len(zero_tmpl_ids) + 1,
+                context=ctx,
+            )
+        except Exception:
+            tmpl_rows = odoo(
+                "product.template", "search_read",
+                domain=[["id", "in", zero_tmpl_ids]],
+                fields=["id", "standard_price"],
+                limit=len(zero_tmpl_ids) + 1,
+            )
+        tmpl_prices = {r["id"]: round(r.get("standard_price") or 0, 4) for r in tmpl_rows}
+        for pid in zero_pids:
+            tmpl_id = combined_tmpl.get(pid)
+            if tmpl_id and tmpl_prices.get(tmpl_id, 0) > 0:
+                result[pid] = tmpl_prices[tmpl_id]
+
+    # ── Step 3: still 0 after template? Try ir.property (raw company_dependent store)
+    still_zero = [pid for pid in result if result[pid] == 0 and combined_tmpl.get(pid)]
+    if still_zero:
+        still_tmpl_ids = list({combined_tmpl[pid] for pid in still_zero})
+        res_ids = [f"product.template,{t}" for t in still_tmpl_ids]
+        try:
+            props = odoo(
+                "ir.property", "search_read",
+                domain=[
+                    ["name", "=", "standard_price"],
+                    ["company_id", "=", company_id],
+                    ["res_id", "in", res_ids],
+                ],
+                fields=["res_id", "value_float"],
+                limit=len(res_ids) + 1,
+            )
+            prop_by_tmpl: dict[int, float] = {}
+            for p in props:
+                # res_id is like "product.template,123"
+                try:
+                    tmpl_id = int(p["res_id"].split(",")[1])
+                    prop_by_tmpl[tmpl_id] = round(p.get("value_float") or 0, 4)
+                except Exception:
+                    pass
+            for pid in still_zero:
+                tmpl_id = combined_tmpl.get(pid)
+                if tmpl_id and prop_by_tmpl.get(tmpl_id, 0) > 0:
+                    result[pid] = prop_by_tmpl[tmpl_id]
+        except Exception:
+            pass  # ir.property access may be restricted — skip silently
+
     return result
 
 
@@ -611,6 +769,80 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+
+# ── Auth config ───────────────────────────────────────────────────────────────
+
+APP_PASSWORD    = os.getenv("APP_PASSWORD", "")
+VIEWER_PASSWORD = os.getenv("VIEWER_PASSWORD", "")
+JWT_SECRET      = os.getenv("JWT_SECRET", "change-me-in-production")
+TOKEN_HOURS     = int(os.getenv("TOKEN_HOURS", "72"))
+
+# ── Auth middleware ───────────────────────────────────────────────────────────
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """
+    JWT auth for all /api/* routes.
+    Disabled automatically when APP_PASSWORD is not set (dev / tests).
+    Supports two roles: admin (full access) and viewer (read-only, future).
+    """
+    if not APP_PASSWORD:
+        # Auth not configured → open access (dev / CI tests)
+        return await call_next(request)
+
+    path = request.url.path
+
+    # Public paths: no token required
+    if (path in {"/", "/api/login", "/api/status"}
+            or path.startswith("/static")
+            or path.startswith("/view/")):
+        return await call_next(request)
+
+    # Protected: all other /api/* routes
+    if path.startswith("/api/"):
+        auth  = request.headers.get("Authorization", "")
+        xview = request.headers.get("X-View-Token", "")
+
+        # Read-only share link — validates against VIEW_TOKEN env var
+        if VIEW_TOKEN and xview == VIEW_TOKEN:
+            request.state.role = "viewer"
+            return await call_next(request)
+
+        token = auth[7:] if auth.startswith("Bearer ") else None
+        if not token:
+            return JSONResponse({"detail": "No autorizado — inicia sesión"}, status_code=401)
+        try:
+            payload = _jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            request.state.role = payload.get("role", "viewer")
+        except _jwt.ExpiredSignatureError:
+            return JSONResponse({"detail": "Sesión caducada — vuelve a entrar"}, status_code=401)
+        except _jwt.InvalidTokenError:
+            return JSONResponse({"detail": "Token inválido"}, status_code=401)
+
+    return await call_next(request)
+
+
+# ── Login endpoint ────────────────────────────────────────────────────────────
+
+@app.post("/api/login")
+async def login(request: Request):
+    """Public endpoint. Returns a signed JWT with the user's role."""
+    body = await request.json()
+    password = body.get("password", "")
+
+    if not APP_PASSWORD:
+        # Auth disabled → always grant admin
+        role = "admin"
+    elif password == APP_PASSWORD:
+        role = "admin"
+    elif VIEWER_PASSWORD and password == VIEWER_PASSWORD:
+        role = "viewer"
+    else:
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+
+    exp   = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
+    token = _jwt.encode({"role": role, "exp": exp}, JWT_SECRET, algorithm="HS256")
+    return {"token": token, "role": role, "expires_hours": TOKEN_HOURS}
 
 
 @app.get("/")
@@ -781,7 +1013,8 @@ def forecast():
         return cached
 
     now   = datetime.now()
-    since = (now - timedelta(days=180)).strftime("%Y-%m-%d")
+    since       = (now - timedelta(days=180)).strftime("%Y-%m-%d")   # 6m for sales/forecast
+    since_price = (now - timedelta(days=730)).strftime("%Y-%m-%d")   # 2y for PO price history
     timeline = build_months_timeline(now, n_months=6)
 
     # Fetch all raw data from Odoo
@@ -795,13 +1028,20 @@ def forecast():
     bom_components = fetch_bom_component_ids(product_ids)
     # Exclude BoM parents/kits (sets assembled from individual products)
     bom_parents    = fetch_bom_parent_ids(product_ids)
-    excluded       = bom_components | bom_parents
+    # Exclude known box/component SKU prefixes (multi-box machines without BoM yet)
+    SKU_COMPONENT_PREFIXES = ("R200-", "MG3L-", "TS-MX90-", "FT90-")
+    sku_excluded = {
+        pid for pid, info in product_info.items()
+        if any(info.get("old_sku", "").upper().startswith(p) for p in SKU_COMPONENT_PREFIXES)
+    }
+    excluded       = bom_components | bom_parents | sku_excluded
     if excluded:
         product_ids  = [pid for pid in product_ids if pid not in excluded]
         product_info = {pid: info for pid, info in product_info.items() if pid not in excluded}
 
     sales_history = fetch_sales_by_month(product_ids, since)
-    vendor_votes, price_data = fetch_po_vendor_and_price(product_ids, since)
+    # Use 2-year window for price history so old (slow-moving) products still get a price
+    vendor_votes, price_data = fetch_po_vendor_and_price(product_ids, since_price)
 
     def dominant_vendor(product_id: int) -> str:
         votes = vendor_votes.get(product_id, {})
@@ -825,6 +1065,7 @@ def forecast():
             "brand_id":     info["brand_id"],
             "brand_name":   info["brand_name"],
             "avg_price":    avg_purchase_price(product_id),
+            "create_date":  info.get("create_date", ""),
         }
 
         if sum(monthly_sales) == 0:
@@ -862,7 +1103,8 @@ def forecast():
 
     # Enrich with live stock + supplier info
     tmpl_by_pid  = {pid: info["tmpl_id"] for pid, info in product_info.items() if info.get("tmpl_id")}
-    supplier_map = fetch_supplier_info(list({t for t in tmpl_by_pid.values() if t}))
+    supplier_map   = fetch_supplier_info(list({t for t in tmpl_by_pid.values() if t}))
+    standard_prices = fetch_standard_prices([r["product_id"] for r in results], tmpl_by_pid=tmpl_by_pid)
 
     all_result_ids = [r["product_id"] for r in results]
 
@@ -899,14 +1141,21 @@ def forecast():
         tmpl_id       = tmpl_by_pid.get(product_id)
         supplier_info = supplier_map.get(tmpl_id, {}) if tmpl_id else {}
         record["vendor_code"]  = supplier_info.get("vendor_code", "")
-        record["vendor_price"] = supplier_info.get("vendor_price") or record["avg_price"]
+        # Price priority: 1) standard_price (cost field, EUR)
+        #                 2) avg purchase price from PO history (last 2 years)
+        #                 3) supplier list price from supplierinfo (compras tab)
+        record["vendor_price"] = (
+            standard_prices.get(product_id)
+            or record["avg_price"]
+            or supplier_info.get("vendor_price", 0.0)
+        )
 
     result = {"products": results, "brands": TARGET_BRANDS}
     cache_set("forecast", result)
     return result
 
 
-# ── Diagnostic route ─────────────────────────────────────────────────────────
+
 
 @app.get("/api/debug/missing")
 def debug_missing(q: str = ""):
@@ -981,6 +1230,191 @@ def debug_missing(q: str = ""):
         })
 
     return {"query": q, "found": len(results), "results": results}
+
+
+@app.get("/api/debug/prices")
+def debug_prices(ids: str = "", q: str = ""):
+    """Inspect standard_price at variant and template level for specific product IDs or name.
+    Usage: /api/debug/prices?ids=123,456  OR  /api/debug/prices?q=monster
+    """
+    product_ids: list[int] = []
+
+    if ids:
+        try:
+            product_ids = [int(i.strip()) for i in ids.split(",") if i.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="IDs inválidos")
+    elif q:
+        matches = odoo(
+            "product.product", "search_read",
+            domain=[["display_name", "ilike", q], ["product_brand_id", "in", TARGET_BRAND_IDS]],
+            fields=["id"],
+            limit=20,
+        )
+        product_ids = [m["id"] for m in matches]
+    else:
+        raise HTTPException(status_code=400, detail="Provide ?ids=1,2,3 or ?q=name")
+
+    if not product_ids:
+        return {"found": 0, "results": []}
+
+    company_id = _get_company_id()
+    ctx = {"company_id": company_id}
+
+    # Read variant-level (with and without company context)
+    variant_rows = odoo(
+        "product.product", "search_read",
+        domain=[["id", "in", product_ids]],
+        fields=["id", "display_name", "default_code", "standard_price", "product_tmpl_id"],
+        limit=len(product_ids) + 1,
+    )
+    variant_rows_ctx = odoo(
+        "product.product", "search_read",
+        domain=[["id", "in", product_ids]],
+        fields=["id", "standard_price"],
+        limit=len(product_ids) + 1,
+        context=ctx,
+    )
+    ctx_price_by_pid = {r["id"]: round(r.get("standard_price") or 0, 4) for r in variant_rows_ctx}
+
+    # Read template-level
+    tmpl_ids = [r["product_tmpl_id"][0] for r in variant_rows if r.get("product_tmpl_id")]
+    tmpl_rows = odoo(
+        "product.template", "search_read",
+        domain=[["id", "in", tmpl_ids]],
+        fields=["id", "name", "standard_price"],
+        limit=len(tmpl_ids) + 1,
+    ) if tmpl_ids else []
+    tmpl_rows_ctx = odoo(
+        "product.template", "search_read",
+        domain=[["id", "in", tmpl_ids]],
+        fields=["id", "standard_price"],
+        limit=len(tmpl_ids) + 1,
+        context=ctx,
+    ) if tmpl_ids else []
+    tmpl_map     = {r["id"]: r for r in tmpl_rows}
+    tmpl_ctx_map = {r["id"]: r for r in tmpl_rows_ctx}
+
+    results = []
+    for r in variant_rows:
+        tmpl_id        = r["product_tmpl_id"][0] if r.get("product_tmpl_id") else None
+        tmpl_data      = tmpl_map.get(tmpl_id, {})
+        tmpl_data_ctx  = tmpl_ctx_map.get(tmpl_id, {})
+        variant_price     = round(r.get("standard_price") or 0, 4)
+        variant_price_ctx = ctx_price_by_pid.get(r["id"], 0)
+        template_price    = round(tmpl_data.get("standard_price") or 0, 4)
+        template_price_ctx= round(tmpl_data_ctx.get("standard_price") or 0, 4)
+        final_price = variant_price_ctx or variant_price or template_price_ctx or template_price
+        results.append({
+            "product_id":      r["id"],
+            "display_name":    r.get("display_name"),
+            "default_code":    r.get("default_code") or "",
+            "tmpl_id":         tmpl_id,
+            "tmpl_name":       tmpl_data.get("name", ""),
+            "company_id_used": company_id,
+            "variant_std_price_no_ctx":   variant_price,
+            "variant_std_price_with_ctx": variant_price_ctx,
+            "template_std_price_no_ctx":  template_price,
+            "template_std_price_with_ctx":template_price_ctx,
+            "final_price_used": final_price,
+            "issue": "⚠️ All 0 — no cost found anywhere" if final_price == 0 else "✅ OK",
+        })
+
+    results.sort(key=lambda x: x["display_name"] or "")
+    return {"found": len(results), "company_id": company_id, "results": results}
+
+
+@app.get("/api/debug/find")
+def debug_find(sku: str = ""):
+    """Find a product in Odoo by old_sku or default_code, and check why it may be excluded from forecast.
+    Usage: /api/debug/find?sku=150X
+    """
+    if not sku:
+        raise HTTPException(status_code=400, detail="Provide ?sku=XXX")
+
+    # Search by old_sku
+    by_old_sku = odoo(
+        "product.product", "search_read",
+        domain=[["old_sku", "=", sku]],
+        fields=["id", "display_name", "old_sku", "default_code", "product_tmpl_id", "product_brand_id", "active"],
+        limit=10,
+    )
+    # Also by default_code
+    by_default = odoo(
+        "product.product", "search_read",
+        domain=[["default_code", "=", sku]],
+        fields=["id", "display_name", "old_sku", "default_code", "product_tmpl_id", "product_brand_id", "active"],
+        limit=10,
+    )
+
+    all_matches = {r["id"]: r for r in by_old_sku + by_default}
+    if not all_matches:
+        return {"found": 0, "message": f"No product found with old_sku or default_code = '{sku}'"}
+
+    results = []
+    for pid, p in all_matches.items():
+        tmpl_id   = p["product_tmpl_id"][0] if p.get("product_tmpl_id") else None
+        brand_id  = p["product_brand_id"][0] if p.get("product_brand_id") else None
+        brand_name= p["product_brand_id"][1] if p.get("product_brand_id") else None
+
+        # Check standard_price with and without context
+        company_id = _get_company_id()
+        try:
+            price_ctx = odoo("product.product", "search_read",
+                domain=[["id","=",pid]], fields=["standard_price"], limit=1, context={"company_id": company_id})
+            sp_ctx = round((price_ctx[0].get("standard_price") or 0) if price_ctx else 0, 4)
+        except Exception:
+            sp_ctx = 0
+        sp_no_ctx = round(p.get("standard_price", 0) or 0, 4)
+
+        # Check template price
+        tmpl_price = 0
+        if tmpl_id:
+            tmpl_rows = odoo("product.template","search_read",domain=[["id","=",tmpl_id]],
+                fields=["id","standard_price"],limit=1,context={"company_id":company_id})
+            if tmpl_rows:
+                tmpl_price = round(tmpl_rows[0].get("standard_price") or 0, 4)
+
+        # Check if in any BoM as component
+        bom_lines = odoo("mrp.bom.line","search_read",domain=[["product_id","=",pid]],
+            fields=["bom_id"],limit=20)
+        as_component_of = []
+        for bl in bom_lines:
+            bom = odoo("mrp.bom","search_read",domain=[["id","=",bl["bom_id"][0]]],
+                fields=["id","product_tmpl_id","type"],limit=1)
+            if bom:
+                as_component_of.append({"bom_id": bom[0]["id"], "parent": bom[0].get("product_tmpl_id",[None,"?"])[1], "type": bom[0].get("type")})
+
+        # Check if it has its own BoM (is a parent)
+        own_boms = odoo("mrp.bom","search_read",domain=[["product_tmpl_id","=",tmpl_id]],
+            fields=["id","type","product_qty"],limit=10) if tmpl_id else []
+
+        in_target_brands = brand_id in TARGET_BRAND_IDS
+
+        results.append({
+            "product_id":       pid,
+            "display_name":     p.get("display_name"),
+            "old_sku":          p.get("old_sku"),
+            "default_code":     p.get("default_code"),
+            "brand":            brand_name,
+            "brand_id":         brand_id,
+            "active":           p.get("active", True),
+            "in_target_brands": in_target_brands,
+            "standard_price_no_ctx":   sp_no_ctx,
+            "standard_price_with_ctx": sp_ctx,
+            "template_price_with_ctx": tmpl_price,
+            "own_boms": [{"bom_id": b["id"], "type": b.get("type")} for b in own_boms],
+            "is_component_of":  as_component_of,
+            "forecast_verdict": (
+                "❌ Marca no monitorizada"   if not in_target_brands else
+                "❌ Archivado en Odoo"       if not p.get("active", True) else
+                "❌ Excluido — BoM phantom propio" if any(b.get("type") == "phantom" for b in own_boms) else
+                "⚠️  Es componente de BoM"  if as_component_of else
+                "✅ Debería aparecer en el forecast"
+            ),
+        })
+
+    return {"found": len(results), "sku_searched": sku, "results": results}
 
 
 # ── Transit order routes ──────────────────────────────────────────────────────
@@ -1411,6 +1845,236 @@ def _do_send_to_odoo(order_id: str, container_lines=None, container_ref: str = "
     write_transit(data2)
 
     return {"po_id": po_id, "po_name": po_name}
+
+
+# ── Order Payments ────────────────────────────────────────────────────────────
+
+@app.patch("/api/transit/{order_id}/payment")
+async def update_order_payment(order_id: str, request: Request):
+    """Update payment data for a transit order.
+    Body: { payments: [{id, description, amount, date}], currency, notes, files }
+    """
+    body = await request.json()
+    data = read_transit()
+    updated = False
+    for o in data["orders"]:
+        if o["id"] == order_id:
+            for field in ("payments", "currency", "notes", "files"):
+                if field in body:
+                    o[field] = body[field]
+            updated = True
+            break
+    if not updated:
+        raise HTTPException(status_code=404, detail="Pedido no encontrado")
+    write_transit(data)
+    return {"ok": True}
+
+
+@app.post("/api/transit/{order_id}/upload")
+async def upload_order_file(order_id: str, file: UploadFile = File(...)):
+    """Upload a file (PDF/Excel) attached to a transit order via Supabase Storage."""
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Supabase no disponible")
+
+    content = await file.read()
+    safe_name = (file.filename or "file").replace(" ", "_")
+    path = f"{order_id}/{safe_name}"
+
+    try:
+        _supabase.storage.from_("container-files").upload(
+            path, content,
+            file_options={"content-type": file.content_type or "application/octet-stream", "upsert": "true"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error subiendo archivo: {e}")
+
+    # Append path to order's files list
+    data = read_transit()
+    for o in data["orders"]:
+        if o["id"] == order_id:
+            files = o.get("files") or []
+            if path not in files:
+                files.append(path)
+            o["files"] = files
+            break
+    write_transit(data)
+
+    try:
+        signed = _supabase.storage.from_("container-files").create_signed_url(path, 3600)
+        url = signed.get("signedURL") or signed.get("signed_url") or ""
+    except Exception:
+        url = ""
+
+    return {"path": path, "url": url, "name": safe_name}
+
+
+@app.delete("/api/transit/{order_id}/file")
+async def delete_order_file(order_id: str, request: Request):
+    """Delete a file from Supabase Storage and remove it from the order record."""
+    body = await request.json()
+    path = body.get("path", "")
+    if not path:
+        raise HTTPException(status_code=400, detail="path requerido")
+    # Security: ensure the path belongs to this order (prefix check)
+    if not path.startswith(f"{order_id}/"):
+        raise HTTPException(status_code=403, detail="El archivo no pertenece a este pedido")
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Supabase no disponible")
+
+    try:
+        _supabase.storage.from_("container-files").remove([path])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error eliminando archivo: {e}")
+
+    data = read_transit()
+    for o in data["orders"]:
+        if o["id"] == order_id:
+            o["files"] = [f for f in (o.get("files") or []) if f != path]
+            break
+    write_transit(data)
+    return {"ok": True, "deleted": path}
+
+
+@app.get("/api/transit/{order_id}/signed-url")
+def get_order_signed_url(order_id: str, path: str):
+    """Get a fresh signed URL (1h) for a file attached to an order."""
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Supabase no disponible")
+    try:
+        signed = _supabase.storage.from_("container-files").create_signed_url(path, 3600)
+        url = signed.get("signedURL") or signed.get("signed_url") or ""
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Alerts ───────────────────────────────────────────────────────────────────
+
+SMTP_USER      = os.getenv("SMTP_USER", "")
+SMTP_PASS      = os.getenv("SMTP_PASS", "")
+SMTP_HOST      = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT      = int(os.getenv("SMTP_PORT", "587"))
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
+ALERT_DAYS     = int(os.getenv("ALERT_DAYS", "14"))
+APP_URL        = os.getenv("APP_URL", "http://localhost:8000")
+
+
+def _send_alert_email(orders: list) -> None:
+    """Send arrival-alert email via Gmail SMTP."""
+    today = datetime.now().date()
+
+    rows = ""
+    for o in orders:
+        arrival = o.get("expected_arrival", "—")
+        days_left = "—"
+        if arrival:
+            try:
+                d = (datetime.strptime(arrival, "%Y-%m-%d").date() - today).days
+                days_left = "HOY" if d == 0 else (f"en {d} días" if d > 0 else f"hace {-d} días (RETRASO)")
+            except Exception:
+                pass
+        total   = sum(l.get("qty", 0) * l.get("price", 0) for l in o.get("lines", []))
+        paid    = sum(float(p.get("amount", 0)) for p in o.get("payments", []))
+        pending = max(total - paid, 0)
+        color   = "#f87171" if pending > 0 else "#34d399"
+        rows += f"""
+        <tr>
+          <td style="padding:10px 14px;border-bottom:1px solid #374151;font-weight:600;">{o.get('ref','—')}</td>
+          <td style="padding:10px 14px;border-bottom:1px solid #374151;color:#9ca3af;">{o.get('supplier','—')}</td>
+          <td style="padding:10px 14px;border-bottom:1px solid #374151;">{arrival}
+            <span style="margin-left:6px;color:#fbbf24;font-size:12px;">({days_left})</span></td>
+          <td style="padding:10px 14px;border-bottom:1px solid #374151;text-align:right;color:{color};font-weight:600;">
+            ${pending:,.0f} USD</td>
+        </tr>"""
+
+    html = f"""
+<!DOCTYPE html><html><body style="margin:0;padding:0;background:#0f172a;font-family:Arial,sans-serif;">
+<div style="max-width:640px;margin:32px auto;background:#1e293b;border-radius:12px;overflow:hidden;">
+  <div style="background:#4f46e5;padding:24px 28px;">
+    <h1 style="margin:0;color:#fff;font-size:20px;">🛒 Odoo Purchasing — Alerta de llegadas</h1>
+    <p style="margin:6px 0 0;color:#c7d2fe;font-size:14px;">
+      {len(orders)} pedido(s) con llegada en los próximos {ALERT_DAYS} días
+    </p>
+  </div>
+  <div style="padding:24px 28px;">
+    <table style="width:100%;border-collapse:collapse;">
+      <thead>
+        <tr style="background:#0f172a;">
+          <th style="padding:10px 14px;text-align:left;color:#6b7280;font-size:11px;text-transform:uppercase;">Ref</th>
+          <th style="padding:10px 14px;text-align:left;color:#6b7280;font-size:11px;text-transform:uppercase;">Proveedor</th>
+          <th style="padding:10px 14px;text-align:left;color:#6b7280;font-size:11px;text-transform:uppercase;">Llegada</th>
+          <th style="padding:10px 14px;text-align:right;color:#6b7280;font-size:11px;text-transform:uppercase;">Pendiente</th>
+        </tr>
+      </thead>
+      <tbody style="color:#f1f5f9;font-size:14px;">{rows}</tbody>
+    </table>
+    <div style="margin-top:24px;text-align:center;">
+      <a href="{APP_URL}" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;
+         padding:12px 28px;border-radius:8px;font-size:14px;font-weight:600;">
+        Abrir la app →
+      </a>
+    </div>
+  </div>
+  <div style="padding:16px 28px;background:#0f172a;text-align:center;">
+    <p style="margin:0;color:#4b5563;font-size:12px;">
+      Odoo Purchasing Intelligence · alerta automática diaria
+    </p>
+  </div>
+</div>
+</body></html>"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🚨 {len(orders)} pedido(s) llegando pronto — Odoo Purchasing"
+    msg["From"]    = SMTP_USER
+    msg["To"]      = ALERT_EMAIL_TO
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+        s.ehlo()
+        s.starttls()
+        s.login(SMTP_USER, SMTP_PASS)
+        s.sendmail(SMTP_USER, ALERT_EMAIL_TO, msg.as_string())
+
+
+@app.get("/api/alerts/check")
+def alerts_check():
+    """Returns active orders arriving within ALERT_DAYS days. Used by the in-app banner."""
+    today   = datetime.now().date()
+    cutoff  = (today + timedelta(days=ALERT_DAYS)).isoformat()
+    today_s = today.isoformat()
+    data    = read_transit()
+    arriving = [
+        o for o in data.get("orders", [])
+        if (o.get("status", "active") == "active"
+            and o.get("expected_arrival")
+            and today_s <= o["expected_arrival"] <= cutoff)
+    ]
+    arriving.sort(key=lambda o: o.get("expected_arrival", ""))
+    return {"orders": arriving, "days": ALERT_DAYS, "count": len(arriving)}
+
+
+@app.post("/api/alerts/send-email")
+def alerts_send_email():
+    """
+    Send the arrival-alert email. Safe to call even when no orders are arriving
+    (returns sent:false). Designed to be hit by cron-job.org every morning at 8 AM.
+    """
+    if not SMTP_USER or not SMTP_PASS or not ALERT_EMAIL_TO:
+        raise HTTPException(
+            status_code=503,
+            detail="Email no configurado — añade SMTP_USER, SMTP_PASS y ALERT_EMAIL_TO en .env"
+        )
+    result  = alerts_check()
+    orders  = result["orders"]
+    if not orders:
+        return {"sent": False, "reason": "No hay pedidos llegando pronto", "count": 0}
+    try:
+        _send_alert_email(orders)
+    except smtplib.SMTPAuthenticationError:
+        raise HTTPException(status_code=503, detail="Error de autenticación SMTP — comprueba SMTP_USER y SMTP_PASS")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error enviando email: {e}")
+    return {"sent": True, "count": len(orders)}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

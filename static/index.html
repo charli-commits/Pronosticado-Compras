@@ -133,6 +133,32 @@ const ReadOnlyCtx = React.createContext(false);
 const useReadOnly = () => React.useContext(ReadOnlyCtx);
 const IS_READONLY = window.location.pathname.startsWith('/view/');
 
+/* ── Auth context ── */
+const AuthCtx = React.createContext({ role: 'admin', logout: () => {} });
+const useAuth = () => React.useContext(AuthCtx);
+
+/* ── Authenticated fetch ── */
+function apiFetch(url, options = {}) {
+  const token    = localStorage.getItem('auth_token');
+  const viewPath = window.location.pathname;
+  const headers  = { ...(options.headers || {}) };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  } else if (IS_READONLY) {
+    // For view-only links: pass the share token so the backend recognises it
+    const viewToken = viewPath.split('/view/')[1];
+    if (viewToken) headers['X-View-Token'] = viewToken;
+  }
+  return fetch(url, { ...options, headers }).then(r => {
+    if (r.status === 401) {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_role');
+      window.location.reload();
+    }
+    return r;
+  });
+}
+
 /* ── API hook ── */
 function useApi(url) {
   const [data,   setData]    = useState(null);
@@ -141,7 +167,7 @@ function useApi(url) {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const r = await fetch(url);
+      const r = await apiFetch(url);
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || r.statusText);
       setData(j);
@@ -222,8 +248,23 @@ function Dashboard() {
     const totalOrders = orders.length;
     const totalContainers = orders.reduce((a, o) => a + (o.odoo_po ? o.odoo_po.split(',').filter(Boolean).length : 0), 0);
     const today = new Date().toISOString().slice(0, 10);
-    const arrivingSoon = orders.filter(o => o.expected_arrival && o.expected_arrival <= new Date(Date.now() + 30*24*3600*1000).toISOString().slice(0,10) && o.expected_arrival >= today).length;
-    return { totalOrders, totalContainers, arrivingSoon };
+    const soon30 = new Date(Date.now() + 30*24*3600*1000).toISOString().slice(0,10);
+    const arrivingSoon = orders.filter(o => o.expected_arrival && o.expected_arrival <= soon30 && o.expected_arrival >= today).length;
+
+    // Payment stats — use stored price if available, fall back to 0
+    let totalPaid = 0, totalPending = 0, ordersWithoutPayment = 0, urgentPending = 0;
+    orders.forEach(o => {
+      const paid     = (o.payments||[]).reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+      // Use stored order_total_usd if set, otherwise estimate from lines
+      const orderVal = (o.lines||[]).reduce((a,l) => a + (parseFloat(l.qty)||0) * (parseFloat(l.price)||0), 0);
+      const pending  = Math.max(0, orderVal - paid);
+      totalPaid    += paid;
+      totalPending += pending;
+      if ((o.payments||[]).length === 0) ordersWithoutPayment++;
+      // Urgent: arriving in <30 days with pending balance
+      if (pending > 0 && o.expected_arrival && o.expected_arrival <= soon30 && o.expected_arrival >= today) urgentPending++;
+    });
+    return { totalOrders, totalContainers, arrivingSoon, totalPaid, totalPending, ordersWithoutPayment, urgentPending };
   }, [transitData]);
 
   const criticalProducts = useMemo(() => {
@@ -609,7 +650,7 @@ function Forecast() {
   const [refreshing, setRefreshing] = useState(false);
   const hardRefresh = async () => {
     setRefreshing(true);
-    await fetch('/api/forecast/refresh');
+    await apiFetch('/api/forecast/refresh');
     await refresh();
     setRefreshing(false);
   };
@@ -623,6 +664,7 @@ function Forecast() {
   const [instrLog,     setInstrLog]     = useState([]);
   const [sortBy,       setSortBy]       = useState('coverage');   // 'coverage' | 'forecast'
   const [urgencyFilter,setUrgencyFilter]= useState(null);         // null | 3 | 5 | 'no_movement'
+  const [newProductFilter, setNewProductFilter] = useState(false); // true = solo productos nuevos (<6m)
   const [summaryOpen,  setSummaryOpen]  = useState(false);
   const [selectedPids,  setSelectedPids]  = useState(new Set());
   const [quickAddModal, setQuickAddModal] = useState(null);
@@ -649,16 +691,18 @@ function Forecast() {
     const firstVendor = selectedProducts[0].vendor || '';
     let existing = [];
     try {
-      const r = await fetch('/api/transit');
+      const r = await apiFetch('/api/transit');
       const j = await r.json();
       existing = (j.orders || []).filter(o => (o.status||'active') === 'active');
     } catch(e) {}
     setExistingOrders(existing);
+    // Prices in Odoo are EUR (standard_price). Convert to USD using today's rate.
+    const eurToUsd = rates?.USD || 1;
     setQuickAddLines(selectedProducts.map(p => ({
       product_id: p.product_id,
       product_name: p.product_name,
-      qty: parseFloat(quantities[p.product_id]),   // exact qty from input, no fallback
-      price: p.vendor_price || p.avg_price || 0,
+      qty: parseFloat(quantities[p.product_id]),
+      price: Math.round(((p.vendor_price || p.avg_price || 0) * eurToUsd) * 100) / 100,
     })));
     setQuickAddForm({ ref:'', supplier: firstVendor, order_date: new Date().toISOString().slice(0,10), expected_arrival:'', targetOrderId:'new' });
     setQuickAddModal(true);
@@ -672,18 +716,18 @@ function Forecast() {
       if (linesToSave.length === 0) { setQuickAddSaving(false); return; }
       let res;
       if (quickAddForm.targetOrderId === 'new') {
-        res = await fetch('/api/transit', {
+        res = await apiFetch('/api/transit', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ ref: quickAddForm.ref, supplier: quickAddForm.supplier, order_date: quickAddForm.order_date, expected_arrival: quickAddForm.expected_arrival, lines: linesToSave }),
         });
       } else {
-        const r = await fetch('/api/transit');
+        const r = await apiFetch('/api/transit');
         const j = await r.json();
         const order = j.orders.find(o => o.id === quickAddForm.targetOrderId);
         if (order) {
           const existingPids = new Set(order.lines.map(l => l.product_id));
           const merged = [...order.lines, ...linesToSave.filter(l => !existingPids.has(l.product_id))];
-          res = await fetch(`/api/transit/${order.id}`, {
+          res = await apiFetch(`/api/transit/${order.id}`, {
             method:'PATCH', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({ ...order, lines: merged }),
           });
@@ -736,17 +780,29 @@ function Forecast() {
     (p.no_movement || p.no_recent_sales)
   ).length, [products, brandFilter]);
 
+  // New products: created in the last 6 months
+  const sixMonthsAgo = useMemo(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 6);
+    return d.toISOString().slice(0, 10); // YYYY-MM-DD
+  }, []);
+  const isNewProduct = (p) => p.create_date && p.create_date >= sixMonthsAgo;
+  const newProductCount = useMemo(() => products.filter(p =>
+    (brandFilter === 'all' || p.brand_id === brandFilter) && isNewProduct(p)
+  ).length, [products, brandFilter, sixMonthsAgo]);
+
   const filtered = useMemo(() => {
     let list = products.filter(p => {
       const brandOk  = brandFilter === 'all' || p.brand_id === brandFilter;
       const vendorOk = vendorFilter === 'all' || p.vendor === vendorFilter;
       const searchOk = !search || p.product_name.toLowerCase().includes(search.toLowerCase());
+      const newOk    = !newProductFilter || isNewProduct(p);
       if (urgencyFilter === 'no_movement') {
-        return brandOk && vendorOk && searchOk && (p.no_movement || p.no_recent_sales);
+        return brandOk && vendorOk && searchOk && newOk && (p.no_movement || p.no_recent_sales);
       }
       // Normal mode: always hide pure no_movement products (0 sales 12m)
-      if (p.no_movement) return false;
-      return brandOk && vendorOk && searchOk &&
+      if (p.no_movement && !newProductFilter) return false;
+      return brandOk && vendorOk && searchOk && newOk &&
         (urgencyFilter === null || (p.coverage_months < urgencyFilter && p.coverage_months > -99));
     });
     if (sortBy === 'coverage') {
@@ -755,8 +811,12 @@ function Forecast() {
     if (urgencyFilter === 'no_movement') {
       list = [...list].sort((a, b) => (b.qty_available||0) - (a.qty_available||0));
     }
+    if (newProductFilter) {
+      // Sort new products by creation date desc (newest first)
+      list = [...list].sort((a, b) => (b.create_date || '').localeCompare(a.create_date || ''));
+    }
     return list;
-  }, [products, brandFilter, vendorFilter, search, urgencyFilter, sortBy]);
+  }, [products, brandFilter, vendorFilter, search, urgencyFilter, sortBy, newProductFilter, sixMonthsAgo]);
 
   // Totals for footer
   const totalQtyToBuy   = useMemo(() => filtered.reduce((a,p) => a + (parseFloat(quantities[p.product_id])||0), 0), [filtered, quantities]);
@@ -1146,15 +1206,27 @@ function Forecast() {
                   <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                     {quickAddLines.map((line, i) => (
                       <div key={line.product_id} className="flex items-center gap-2 bg-gray-800/60 border border-gray-700/50 rounded-lg px-3 py-2">
-                        <span className="text-xs text-gray-300 flex-1 truncate" title={line.product_name}>{line.product_name}</span>
-                        {line.price > 0 && <span className="text-xs text-gray-500 shrink-0">{money(line.price)}</span>}
+                        <span className="text-xs text-gray-300 flex-1 truncate min-w-0" title={line.product_name}>{line.product_name}</span>
                         <input type="number" min="0" step="1"
                           value={line.qty}
                           onChange={e => {
                             const v = Math.max(0, parseFloat(e.target.value)||0);
                             setQuickAddLines(prev => prev.map((l,j) => j===i ? {...l, qty:v} : l));
                           }}
-                          className="w-20 px-2 py-1 rounded text-sm text-center bg-gray-900 border border-gray-600 text-emerald-300 font-semibold focus:border-amber-500 outline-none" />
+                          title="Cantidad"
+                          className="w-20 px-2 py-1 rounded text-sm text-center bg-gray-900 border border-gray-600 text-emerald-300 font-semibold focus:border-amber-500 outline-none shrink-0" />
+                        <input type="number" min="0" step="0.01"
+                          value={line.price ?? ''}
+                          onChange={e => {
+                            const v = parseFloat(e.target.value)||0;
+                            setQuickAddLines(prev => prev.map((l,j) => j===i ? {...l, price:v} : l));
+                          }}
+                          title="Precio unitario"
+                          placeholder="precio"
+                          className="w-24 px-2 py-1 rounded text-sm text-right bg-gray-900 border border-gray-600 text-amber-200 focus:border-amber-500 outline-none shrink-0" />
+                        <span className="text-xs text-emerald-400 w-20 text-right shrink-0">
+                          {line.qty > 0 && line.price > 0 ? money(line.qty * line.price) : '—'}
+                        </span>
                         <button onClick={() => setQuickAddLines(prev => prev.filter((_,j) => j!==i))}
                           className="text-gray-600 hover:text-red-400 text-sm leading-none shrink-0">×</button>
                       </div>
@@ -1285,6 +1357,16 @@ function Forecast() {
               {label} <span className="ml-1 opacity-60">{count}</span>
             </button>
           ))}
+          {/* New products filter */}
+          <button onClick={() => setNewProductFilter(v => !v)}
+            title="Productos creados en Odoo en los últimos 6 meses. Su pronóstico puede ser menos fiable por historial corto."
+            className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${
+              newProductFilter
+                ? 'bg-cyan-600 border-cyan-500 text-white'
+                : 'bg-transparent border-cyan-800/60 text-cyan-400 hover:bg-cyan-900/20'
+            }`}>
+            🆕 Nuevos <span className="ml-1 opacity-60">{newProductCount}</span>
+          </button>
           <div className="ml-auto flex items-center gap-1.5 text-xs text-gray-500">
             <span>Ordenar:</span>
             <button onClick={() => setSortBy('coverage')}
@@ -1454,6 +1536,7 @@ function Forecast() {
                         <td className="px-3 py-2.5 sticky left-0 bg-gray-900 z-10 min-w-0 group/name relative" style={{maxWidth:260}}>
                           <div className="truncate text-gray-200 font-medium text-xs" title={p.product_name}>
                             {p.is_kit && <span className="mr-1 text-amber-500" title="Kit — stock calculado desde componentes">🧩</span>}
+                            {isNewProduct(p) && <span className="mr-1 text-cyan-400" title={`Producto nuevo — creado el ${p.create_date}`}>🆕</span>}
                             {p.product_name}
                           </div>
                           <div className="absolute left-0 top-full mt-1 z-50 hidden group-hover/name:block bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-xs text-gray-100 shadow-xl whitespace-normal max-w-xs pointer-events-none" style={{minWidth:200}}>
@@ -1744,6 +1827,8 @@ const TABS = [
   { id:'stock',     label:'Alertas de stock', icon:'📦' },
   { id:'forecast',  label:'Pronóstico',        icon:'🔮' },
   { id:'transit',   label:'En tránsito',       icon:'🚢' },
+  { id:'payments',  label:'Container Payments', icon:'💰' },
+  { id:'historial', label:'Historial',          icon:'📋' },
 ];
 
 /* ══════════════════════════════════════════════════════════════
@@ -1767,6 +1852,12 @@ function Transit() {
   const [archiveDate,     setArchiveDate]     = useState('');
   const [showHistory,     setShowHistory]     = useState(false);
   const [rates,           setRates]           = useState(null);  // { CNY, USD }
+  const [paymentModal,    setPaymentModal]    = useState(null);  // { order }
+  const [paymentForm,     setPaymentForm]     = useState({ payments:[], currency:'USD', notes:'', files:[] });
+  const [paymentSaving,   setPaymentSaving]   = useState(false);
+  const [fileUploading,   setFileUploading]   = useState(false);
+  const [paymentFilter,   setPaymentFilter]   = useState('all'); // 'all'|'none'|'partial'|'complete'
+  const [transitSort,     setTransitSort]     = useState('arrival'); // 'arrival'|'order_date'|'created'
 
   React.useEffect(() => {
     fetch('/api/exchange-rates').then(r=>r.json()).then(setRates).catch(()=>{});
@@ -1786,9 +1877,19 @@ function Transit() {
     return 'text-gray-400 bg-gray-800/40 border-gray-700/50';
   };
 
+  // Returns 'none' | 'partial' | 'complete' for an order
+  const getPaymentStatus = (order) => {
+    const pmts = order.payments || [];
+    if (pmts.length === 0) return 'none';
+    const paid     = pmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+    const orderVal = (order.lines||[]).reduce((a,l) => a+(parseFloat(l.qty)||0)*(parseFloat(l.price)||0), 0);
+    if (orderVal > 0 && paid >= orderVal) return 'complete';
+    return 'partial';
+  };
+
   const archiveOrder = async () => {
     if (!archiveModal) return;
-    await fetch(`/api/transit/${archiveModal.order.id}/archive`, {
+    await apiFetch(`/api/transit/${archiveModal.order.id}/archive`, {
       method:'PATCH', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ actual_arrival: archiveDate }),
     });
@@ -1813,7 +1914,7 @@ function Transit() {
   const loadOrders = async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/transit');
+      const r = await apiFetch('/api/transit');
       const j = await r.json();
       // Sort by expected_arrival ascending; orders without date go to the end
       const sorted = (j.orders || []).sort((a, b) => {
@@ -1830,16 +1931,18 @@ function Transit() {
 
   const deleteOrder = async (id) => {
     if (!window.confirm('¿Eliminar este pedido y todas sus líneas?')) return;
-    await fetch(`/api/transit/${id}`, { method:'DELETE' });
+    await apiFetch(`/api/transit/${id}`, { method:'DELETE' });
     loadOrders();
   };
   const deleteLine = async (orderId, lineId) => {
-    await fetch(`/api/transit/${orderId}/lines/${lineId}`, { method:'DELETE' });
+    await apiFetch(`/api/transit/${orderId}/lines/${lineId}`, { method:'DELETE' });
     loadOrders();
   };
   const addLine = (product) => {
     if (lines.find(l => l.product_id === product.product_id)) return;
-    setLines(prev => [...prev, { product_id: product.product_id, product_name: product.product_name, qty: product.suggested_qty || 1, price: priceMap[product.product_id] || 0 }]);
+    const eurToUsd = rates?.USD || 1;
+    const priceEur = priceMap[product.product_id] || 0;
+    setLines(prev => [...prev, { product_id: product.product_id, product_name: product.product_name, qty: product.suggested_qty || 1, price: Math.round(priceEur * eurToUsd * 100) / 100 }]);
     setPSearch('');
   };
   const openContainerModal = (order) => {
@@ -1864,7 +1967,7 @@ function Transit() {
           .filter(l => l.container_qty > 0)
           .map(l => ({ product_id: l.product_id, product_name: l.product_name, qty: l.container_qty, price: l.price })),
       };
-      const r = await fetch(`/api/transit/${order.id}/send-to-odoo`, {
+      const r = await apiFetch(`/api/transit/${order.id}/send-to-odoo`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1883,16 +1986,18 @@ function Transit() {
   const saveOrder = async () => {
     if (!form.ref || lines.length === 0) return;
     if (editingOrder) {
-      await fetch(`/api/transit/${editingOrder.id}`, {
+      await apiFetch(`/api/transit/${editingOrder.id}`, {
         method:'PATCH',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ ...form, lines }),
       });
     } else {
-      await fetch('/api/transit', {
+      // Save current EUR→USD rate at creation time for historical reference
+      const creationRate = rates?.USD || null;
+      await apiFetch('/api/transit', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ ...form, lines }),
+        body: JSON.stringify({ ...form, lines, exchange_rate_at_creation: creationRate }),
       });
     }
     resetForm();
@@ -1952,7 +2057,7 @@ function Transit() {
     let details = {};
     if (allPids.length > 0) {
       try {
-        const r = await fetch(`/api/products/transit-details?ids=${allPids.join(',')}`);
+        const r = await apiFetch(`/api/products/transit-details?ids=${allPids.join(',')}`);
         details = await r.json();
       } catch(e) { /* silently skip if error */ }
     }
@@ -2045,7 +2150,7 @@ function Transit() {
       for (const order of importPreview) {
         const linesToSave = order.lines.filter(l => l.product_id && l.qty > 0);
         if (linesToSave.length === 0) continue;
-        const res = await fetch('/api/transit', {
+        const res = await apiFetch('/api/transit', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ref: order.ref, supplier: order.supplier, order_date: order.order_date, expected_arrival: order.expected_arrival, lines: linesToSave }),
         });
@@ -2212,8 +2317,8 @@ function Transit() {
           <p className="text-xs text-gray-500 mt-0.5">
             Pedidos ya realizados pero pendientes de entrar en Odoo
             {orders.length > 0 && (() => {
-              const totalVal = orders.reduce((a,o) => a + o.lines.reduce((b,l) => b + l.qty*(priceMap[l.product_id]||0), 0), 0);
-              return ` · ${orders.length} pedido${orders.length>1?'s':''} · ${num(totalLines,0)} referencias · ${num(totalUnits,0)} uds · ${totalVal > 0 ? money(totalVal) : ''}`;
+              const totalVal = orders.reduce((a,o) => a + o.lines.reduce((b,l) => b + l.qty*(l.price||(priceMap[l.product_id]||0)*(rates?.USD||1)), 0), 0);
+              return ` · ${orders.length} pedido${orders.length>1?'s':''} · ${num(totalLines,0)} referencias · ${num(totalUnits,0)} uds · ${totalVal > 0 ? `USD ${Math.round(totalVal).toLocaleString('es-ES')}` : ''}`;
             })()}
           </p>
         </div>
@@ -2238,7 +2343,7 @@ function Transit() {
         </div>
       </div>
 
-      {/* Search + supplier filter */}
+      {/* Search + supplier filter + payment filter */}
       {!showForm && orders.length > 0 && (
         <div className="flex items-center gap-3 flex-wrap">
           <input type="text" value={transitSearch} onChange={e => setTransitSearch(e.target.value)}
@@ -2251,12 +2356,84 @@ function Transit() {
               {suppliers.map(s => <option key={s} value={s}>{s} ({orders.filter(o=>o.supplier===s).length})</option>)}
             </select>
           )}
-          {(transitSearch || supplierFilter !== 'all') && (
-            <button onClick={() => { setTransitSearch(''); setSupplierFilter('all'); }}
+          {/* Payment status filter */}
+          <div className="flex items-center gap-1">
+            {[
+              { key:'all',      label:'💳 Todos',         cls:'bg-gray-700 text-gray-200' },
+              { key:'none',     label:'⬜ Sin pago',       cls:'bg-gray-800 border-gray-600 text-gray-400' },
+              { key:'partial',  label:'🟡 Parcial',        cls:'bg-amber-900/40 border-amber-700/50 text-amber-400' },
+              { key:'complete', label:'✅ Pagado',          cls:'bg-emerald-900/40 border-emerald-700/50 text-emerald-400' },
+            ].map(f => (
+              <button key={f.key} onClick={() => setPaymentFilter(f.key)}
+                className={`px-2.5 py-1.5 rounded-lg text-xs border font-medium transition-colors ${
+                  paymentFilter === f.key ? f.cls + ' ring-1 ring-indigo-500' : 'bg-gray-800/50 border-gray-700 text-gray-500 hover:text-gray-300'
+                }`}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+          {/* Sort selector */}
+          <div className="flex items-center gap-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg px-2 py-1">
+            <span className="text-xs text-gray-500 shrink-0">Ordenar:</span>
+            {[
+              { key: 'arrival',    label: '📦 Llegada' },
+              { key: 'order_date', label: '📅 Pedido' },
+              { key: 'created',    label: '🕐 Creación' },
+            ].map(opt => (
+              <button key={opt.key} onClick={() => setTransitSort(opt.key)}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${transitSort === opt.key ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {(transitSearch || supplierFilter !== 'all' || paymentFilter !== 'all' || transitSort !== 'arrival') && (
+            <button onClick={() => { setTransitSearch(''); setSupplierFilter('all'); setPaymentFilter('all'); setTransitSort('arrival'); }}
               className="text-xs text-gray-500 hover:text-gray-300">✕ Limpiar filtros</button>
           )}
         </div>
       )}
+
+      {/* Payment summary panel */}
+      {!showForm && activeOrders.some(o => (o.payments||[]).length > 0) && (() => {
+        const filteredForPayments = supplierFilter === 'all' ? activeOrders : activeOrders.filter(o => o.supplier === supplierFilter);
+        const bySupplier = {};
+        filteredForPayments.forEach(o => {
+          const sup = o.supplier || 'Sin fábrica';
+          const paid    = (o.payments||[]).reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+          const orderVal = o.lines.reduce((a,l) => a+(parseFloat(l.qty)||0)*(l.price||(priceMap[l.product_id]||0)*(rates?.USD||1)), 0);
+          if (!bySupplier[sup]) bySupplier[sup] = { paid:0, orderVal:0 };
+          bySupplier[sup].paid     += paid;
+          bySupplier[sup].orderVal += orderVal;
+        });
+        const totalPaid    = Object.values(bySupplier).reduce((a,v) => a+v.paid, 0);
+        const totalOrderVal= Object.values(bySupplier).reduce((a,v) => a+v.orderVal, 0);
+        const totalPending = Math.max(0, totalOrderVal - totalPaid);
+        return (
+          <div className="bg-gray-900 border border-amber-800/30 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-semibold text-amber-400">💰 Resumen de pagos</span>
+              <div className="flex gap-6 text-center">
+                <div><p className="text-xs text-gray-500">Valor total pedidos</p><p className="text-sm font-bold text-white">{money(totalOrderVal)}</p></div>
+                <div><p className="text-xs text-gray-500">Pagado</p><p className="text-sm font-bold text-emerald-400">{money(totalPaid)}</p></div>
+                <div><p className="text-xs text-gray-500">Pendiente</p><p className={`text-sm font-bold ${totalPending>0?'text-amber-400':'text-emerald-400'}`}>{money(totalPending)}</p></div>
+              </div>
+            </div>
+            {Object.keys(bySupplier).length > 1 && (
+              <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-gray-800">
+                {Object.entries(bySupplier).map(([sup, v]) => (
+                  <div key={sup} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-3 py-1.5">
+                    <span className="text-xs text-gray-400 truncate mr-2">{sup}</span>
+                    <div className="flex gap-3 shrink-0 text-xs">
+                      <span className="text-emerald-400">✅ {money(v.paid)}</span>
+                      {v.orderVal > v.paid && <span className="text-amber-400">⏳ {money(Math.max(0,v.orderVal-v.paid))}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* New order form */}
       {showForm && (
@@ -2331,7 +2508,9 @@ function Transit() {
                 <thead>
                   <tr className="border-b border-gray-700">
                     <th className="px-3 py-2 text-left text-gray-400 font-medium">Producto</th>
-                    <th className="px-3 py-2 text-right text-gray-400 font-medium w-32">Cantidad (uds)</th>
+                    <th className="px-3 py-2 text-right text-gray-400 font-medium w-28">Cantidad</th>
+                    <th className="px-3 py-2 text-right text-gray-400 font-medium w-28">Precio unit.</th>
+                    <th className="px-3 py-2 text-right text-gray-400 font-medium w-24">Total</th>
                     <th className="px-3 py-2 w-8"></th>
                   </tr>
                 </thead>
@@ -2343,6 +2522,15 @@ function Transit() {
                         <input type="number" min="0" value={l.qty}
                           onChange={e => setLines(prev => prev.map(x => x.product_id===l.product_id ? {...x, qty: parseFloat(e.target.value)||0} : x))}
                           className="w-full px-2 py-1 rounded text-right bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-indigo-500" />
+                      </td>
+                      <td className="px-3 py-2">
+                        <input type="number" min="0" step="0.01" value={l.price ?? ''}
+                          onChange={e => setLines(prev => prev.map(x => x.product_id===l.product_id ? {...x, price: parseFloat(e.target.value)||0} : x))}
+                          placeholder="0.00"
+                          className="w-full px-2 py-1 rounded text-right bg-gray-700 border border-gray-600 text-amber-200 focus:outline-none focus:border-amber-500" />
+                      </td>
+                      <td className="px-3 py-2 text-right text-xs text-emerald-400 font-semibold">
+                        {(l.qty && l.price) ? money(l.qty * l.price) : '—'}
                       </td>
                       <td className="px-3 py-2 text-center">
                         <button onClick={() => setLines(prev => prev.filter(x => x.product_id !== l.product_id))}
@@ -2357,7 +2545,10 @@ function Transit() {
 
 
           <div className="flex items-center gap-2 justify-between">
-            <p className="text-xs text-gray-600">{lines.length} producto{lines.length!==1?'s':''} · {num(lines.reduce((a,l)=>a+l.qty,0),0)} uds</p>
+            <p className="text-xs text-gray-600">
+              {lines.length} producto{lines.length!==1?'s':''} · {num(lines.reduce((a,l)=>a+l.qty,0),0)} uds
+              {lines.some(l=>l.price>0) && <span className="ml-2 text-emerald-400 font-semibold">· {money(lines.reduce((a,l)=>a+(l.qty||0)*(l.price||0),0))}</span>}
+            </p>
             <div className="flex gap-2">
               <button onClick={resetForm}
                 className="px-4 py-1.5 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
@@ -2387,7 +2578,24 @@ function Transit() {
             const q = transitSearch.toLowerCase().trim();
             const visibleOrders = activeOrders
               .filter(o => supplierFilter === 'all' || o.supplier === supplierFilter)
-              .filter(o => !q || o.lines.some(l => l.product_name.toLowerCase().includes(q)));
+              .filter(o => paymentFilter === 'all' || getPaymentStatus(o) === paymentFilter)
+              .filter(o => !q || o.lines.some(l => l.product_name.toLowerCase().includes(q)))
+              .slice().sort((a, b) => {
+                let da, db;
+                if (transitSort === 'arrival') {
+                  da = a.expected_arrival || '9999';
+                  db = b.expected_arrival || '9999';
+                  return da.localeCompare(db); // asc: más próximo primero
+                } else if (transitSort === 'order_date') {
+                  da = a.order_date || '';
+                  db = b.order_date || '';
+                  return db.localeCompare(da); // desc: más reciente primero
+                } else {
+                  da = a.created_at || '';
+                  db = b.created_at || '';
+                  return db.localeCompare(da); // desc
+                }
+              });
             if (q && visibleOrders.length === 0) return (
               <div className="text-center py-12 text-gray-600 fade">
                 <p className="text-3xl mb-2">🔍</p>
@@ -2402,9 +2610,13 @@ function Transit() {
             const totalQty     = order.lines.reduce((a, l) => a + l.qty, 0);
             const totalOrigQty = order.lines.reduce((a, l) => a + (l.original_qty || l.qty), 0);
             const hasPartial   = totalOrigQty > totalQty;
-            const totalValue   = order.lines.reduce((a, l) => a + l.qty * (priceMap[l.product_id] || 0), 0);
+            // Use stored l.price (USD) first; fall back to live Odoo price × rate
+            const totalValueUsd = Math.round(order.lines.reduce((a, l) =>
+              a + l.qty * (l.price || (priceMap[l.product_id]||0)*(rates?.USD||1)), 0));
             const matchingLines = q ? order.lines.filter(l => l.product_name.toLowerCase().includes(q)) : null;
             const countsInForecast = !order.expected_arrival || order.expected_arrival < horizonStr2;
+            const today2    = new Date().toISOString().slice(0,7);
+            const soon30str = new Date(Date.now()+30*24*3600*1000).toISOString().slice(0,7);
             return (
               <div key={order.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden fade">
                 {/* Order header */}
@@ -2433,9 +2645,63 @@ function Transit() {
                     <p className="text-xs text-gray-500 mt-0.5">
                       {order.lines.length} producto{order.lines.length!==1?'s':''} · <span className="text-amber-400 font-semibold">{num(totalQty,0)} uds pendientes</span>
                       {hasPartial && <span className="text-gray-500"> / {num(totalOrigQty,0)} original</span>}
-                      {totalValue > 0 && <span className="ml-2 text-emerald-400 font-semibold">· {money(totalValue)}</span>}
+                      {totalValueUsd > 0 && <span className="ml-2 text-emerald-400 font-semibold">· USD {totalValueUsd.toLocaleString('es-ES')}</span>}
+                      {order.exchange_rate_at_creation && <span className="ml-2 text-gray-600 text-xs" title={`Tipo de cambio al hacer el pedido: 1 EUR = ${order.exchange_rate_at_creation} USD`}>@ {order.exchange_rate_at_creation.toFixed(3)}</span>}
                     </p>
+                    {(() => {
+                      const pmts      = order.payments || [];
+                      const cur       = order.currency || 'USD';
+                      const abonoSum  = pmts.filter(p => (p.description||'').toLowerCase() === 'abono').reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+                      const outgoing  = pmts.filter(p => (p.description||'').toLowerCase() !== 'abono').reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+                      const totalPaid = outgoing + abonoSum; // total reducción del saldo
+                      // Use stored line prices for order value
+                      const orderVal  = (order.lines||[]).reduce((a,l) => a+(parseFloat(l.qty)||0)*(parseFloat(l.price)||0), 0);
+                      const pending   = orderVal > 0 ? Math.max(0, orderVal - totalPaid) : 0;
+                      const pct       = orderVal > 0 ? Math.min(100, Math.round((totalPaid / orderVal) * 100)) : 0;
+                      const arrivingSoonWithPending = pending > 0
+                        && order.expected_arrival
+                        && order.expected_arrival <= soon30str
+                        && order.expected_arrival >= today2;
+
+                      return (
+                        <>
+                          {pmts.length > 0 && (
+                            <p className="text-xs mt-1 flex items-center gap-3 flex-wrap">
+                              {outgoing > 0 && <span className="text-emerald-400">✅ Pagado: {cur} {num(outgoing,0)}</span>}
+                              {abonoSum > 0 && <span className="text-emerald-300">↩️ Abono: {cur} {num(abonoSum,0)}</span>}
+                              {pending > 0 && <span className="text-amber-400">⏳ Pendiente: {cur} {num(pending,0)}</span>}
+                              {pending === 0 && orderVal > 0 && <span className="text-emerald-500 font-semibold">· Pagado completo ✓</span>}
+                            </p>
+                          )}
+                          {arrivingSoonWithPending && (
+                            <p className="text-xs mt-1">
+                              <span className="px-2 py-0.5 rounded bg-red-900/50 border border-red-700/60 text-red-400 font-semibold animate-pulse">
+                                ⚠️ Llega pronto — saldo pendiente: {cur} {num(pending,0)}
+                              </span>
+                            </p>
+                          )}
+                          {/* Progress bar */}
+                          {orderVal > 0 && (
+                            <div className="mt-1.5 flex items-center gap-2">
+                              <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                <div className={`h-full rounded-full transition-all duration-500 ${pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-gray-700'}`}
+                                  style={{width:`${pct}%`}} />
+                              </div>
+                              <span className={`text-xs font-semibold ${pct >= 100 ? 'text-emerald-400' : pct > 0 ? 'text-amber-400' : 'text-gray-600'}`}>{pct}%</span>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
+                  {/* Document indicator */}
+                  {(order.files||[]).length > 0 && (
+                    <div className="shrink-0 ml-1" title={`${(order.files||[]).length} documento${(order.files||[]).length!==1?'s':''} adjunto${(order.files||[]).length!==1?'s':''}`}>
+                      <span className="px-2 py-1 rounded text-xs bg-indigo-900/30 border border-indigo-700/40 text-indigo-400 flex items-center gap-1">
+                        📎 {(order.files||[]).length}
+                      </span>
+                    </div>
+                  )}
                   {!readOnly && (
                   <div className="flex items-center gap-2 shrink-0">
                     {order.odoo_po ? (
@@ -2449,7 +2715,7 @@ function Transit() {
                             <button onClick={async e => {
                                 e.stopPropagation();
                                 if (!window.confirm(`¿Desvincular ${po} y restaurar sus cantidades?`)) return;
-                                await fetch(`/api/transit/${order.id}/odoo-link/${encodeURIComponent(po)}`, { method: 'DELETE' });
+                                await apiFetch(`/api/transit/${order.id}/odoo-link/${encodeURIComponent(po)}`, { method: 'DELETE' });
                                 loadOrders();
                               }}
                               title={`Desvincular solo ${po}`}
@@ -2467,7 +2733,7 @@ function Transit() {
                         <button onClick={async e => {
                             e.stopPropagation();
                             if (!window.confirm('¿Borrar TODOS los vínculos a Odoo y restaurar cantidades originales?')) return;
-                            await fetch(`/api/transit/${order.id}/odoo-link`, { method: 'DELETE' });
+                            await apiFetch(`/api/transit/${order.id}/odoo-link`, { method: 'DELETE' });
                             loadOrders();
                           }}
                           title="Desvincular todas las OC"
@@ -2483,18 +2749,54 @@ function Transit() {
                         {sendingOdoo.has(order.id) ? '⏳' : '📤'} Odoo
                       </button>
                     )}
+                    <button onClick={e => {
+                        e.stopPropagation();
+                        // Migrate old deposit/balance fields to new payments array
+                        let pmts = order.payments || [];
+                        if (pmts.length === 0) {
+                          if (order.deposit_amount) pmts.push({ id: crypto.randomUUID(), description: 'Depósito', amount: String(order.deposit_amount), date: order.deposit_date || '' });
+                          if (order.balance_amount)  pmts.push({ id: crypto.randomUUID(), description: 'Saldo',    amount: String(order.balance_amount),  date: order.balance_date  || '' });
+                        }
+                        setPaymentForm({
+                          payments:    pmts,
+                          currency:    order.currency    || 'USD',
+                          order_total: order.order_total || '',
+                          notes:       order.notes       || '',
+                          files:       order.files       || [],
+                        });
+                        setPaymentModal({ order });
+                      }}
+                      title="Pagos y documentos de este pedido"
+                      className={`px-3 py-1.5 rounded-lg text-xs border transition-colors flex items-center gap-1 ${
+                        (() => {
+                          const pmts = order.payments || [];
+                          const paid = pmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+                          const total = order.lines.reduce((a,l) => a + l.qty*(parseFloat(l.price)||0), 0);
+                          if (paid > 0 && total > 0 && paid >= total) return 'bg-emerald-900/30 border-emerald-700/50 text-emerald-400';
+                          if (paid > 0) return 'bg-amber-900/30 border-amber-700/50 text-amber-400';
+                          return 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600 hover:text-white';
+                        })()
+                      }`}>
+                      {(() => {
+                        const pmts = order.payments || [];
+                        const paid = pmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+                        const total = order.lines.reduce((a,l) => a + l.qty*(parseFloat(l.price)||0), 0);
+                        if (paid > 0 && total > 0 && paid >= total) return '✅';
+                        if (paid > 0) return '🟡';
+                        return '💰';
+                      })()} Pagos
+                    </button>
                     <button onClick={e => { e.stopPropagation(); startEdit(order); }}
                       disabled={showForm || !!order.odoo_po}
                       title={order.odoo_po ? 'Cancela todas las GCPOs antes de editar' : ''}
                       className="px-3 py-1.5 rounded-lg text-xs bg-indigo-900/30 border border-indigo-700/50 text-indigo-400 hover:bg-indigo-900/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1">
                       ✏️ Editar
                     </button>
-                    {order.odoo_po ? (
-                      <button onClick={e => { e.stopPropagation(); setArchiveDate(''); setArchiveModal({order}); }}
-                        className="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-400 hover:bg-gray-700 transition-colors flex items-center gap-1">
-                        ✅ Archivar
-                      </button>
-                    ) : (
+                    <button onClick={e => { e.stopPropagation(); setArchiveDate(''); setArchiveModal({order}); }}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-400 hover:bg-gray-700 transition-colors flex items-center gap-1">
+                      📦 Archivar
+                    </button>
+                    {!order.odoo_po && (
                       <button onClick={e => { e.stopPropagation(); deleteOrder(order.id); }}
                         className="px-3 py-1.5 rounded-lg text-xs bg-red-900/30 border border-red-800/50 text-red-400 hover:bg-red-900/60 transition-colors flex items-center gap-1">
                         🗑️ Eliminar
@@ -2537,12 +2839,19 @@ function Transit() {
                                   : <span className="text-amber-400">🚢 +{num(line.qty,0)}</span>}
                               </td>
                               <td className="px-4 py-2.5 text-right text-xs text-gray-400">
-                                {priceMap[line.product_id] ? <>
-                                  {rates?.USD && <div className="text-white font-medium">${num(priceMap[line.product_id]*rates.USD,2)}</div>}
-                                  <div className="text-gray-500">{money(priceMap[line.product_id])}</div>
-                                </> : '—'}
+                                {line.price ? <>
+                                  <div className="text-white font-medium">${num(line.price,2)}</div>
+                                  {rates?.USD && <div className="text-gray-500">{money(line.price/(rates.USD||1))}</div>}
+                                </> : (priceMap[line.product_id] ? <>
+                                  <div className="text-amber-200/60 font-medium text-xs">${num(priceMap[line.product_id]*(rates?.USD||1),2)}</div>
+                                  <div className="text-gray-600 text-xs">estimado</div>
+                                </> : '—')}
                               </td>
-                              <td className="px-4 py-2.5 text-right text-xs font-semibold text-emerald-400">{priceMap[line.product_id] ? money(line.qty * priceMap[line.product_id]) : '—'}</td>
+                              <td className="px-4 py-2.5 text-right text-xs font-semibold text-emerald-400">
+                                {line.price
+                                  ? `$${num(line.qty * line.price, 0)}`
+                                  : (priceMap[line.product_id] ? <span className="text-amber-200/50">${num(line.qty*(priceMap[line.product_id]*(rates?.USD||1)),0)}</span> : '—')}
+                              </td>
                               {!readOnly && (
                               <td className="px-4 py-2.5 text-center">
                                 <button onClick={() => deleteLine(order.id, line.id)}
@@ -2598,7 +2907,7 @@ function Transit() {
                       </div>
                     </div>
                     {!readOnly && (
-                      <button onClick={async () => { await fetch(`/api/transit/${order.id}/unarchive`,{method:'PATCH'}); loadOrders(); }}
+                      <button onClick={async () => { await apiFetch(`/api/transit/${order.id}/unarchive`,{method:'PATCH'}); loadOrders(); }}
                         title="Restaurar a activo"
                         className="px-2 py-1 rounded text-xs bg-gray-800 border border-gray-700 text-gray-500 hover:text-white transition-colors shrink-0">
                         ↩ Restaurar
@@ -2675,6 +2984,898 @@ function Transit() {
           </div>
         </div>
       )}
+
+      {/* ── Payment Modal ──────────────────────────────────────────────────── */}
+      {paymentModal && (() => {
+        const { order } = paymentModal;
+        const pf = paymentForm;
+        const cur = pf.currency || 'USD';
+        // Abonos reduce lo que debes (a tu favor); el neto pagado = pagos + abonos
+        const totalPaid  = (pf.payments||[]).reduce((a,p) => a+(parseFloat(p.amount)||0), 0); // neto total (incl. abonos)
+        const totalAbono = (pf.payments||[]).filter(p=>(p.description||'').toLowerCase()==='abono').reduce((a,p)=>a+(parseFloat(p.amount)||0),0);
+        // Order value: stored price (USD) first, fallback to live Odoo price × rate for legacy orders
+        const orderValue = (order.lines||[]).reduce((a,l) =>
+          a+(parseFloat(l.qty)||0)*(parseFloat(l.price)||(priceMap[l.product_id]||0)*(rates?.USD||1)), 0);
+        const pending    = orderValue > 0 ? Math.max(0, orderValue - totalPaid) : null;
+        // Exchange rate: stored at creation, or current rate as fallback
+        const savedRate  = order.exchange_rate_at_creation || null;
+        const currentRate = rates?.USD || null;
+        const addPayment = (desc) => setPaymentForm(prev => ({
+          ...prev,
+          payments: [...(prev.payments||[]), { id: crypto.randomUUID(), description: desc||'', amount: '', date: new Date().toISOString().slice(0,10) }]
+        }));
+        const updatePayment = (id, field, val) => setPaymentForm(prev => ({
+          ...prev,
+          payments: prev.payments.map(p => p.id===id ? {...p, [field]: val} : p)
+        }));
+        const removePayment = (id) => setPaymentForm(prev => ({
+          ...prev,
+          payments: prev.payments.filter(p => p.id !== id)
+        }));
+
+        const savePayment = async () => {
+          setPaymentSaving(true);
+          try {
+            const res = await apiFetch(`/api/transit/${order.id}/payment`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(pf),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            loadOrders();
+            setPaymentModal(null);
+          } catch(e) { alert('Error guardando: ' + e.message); }
+          finally { setPaymentSaving(false); }
+        };
+
+        const uploadFile = async (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          setFileUploading(true);
+          try {
+            const fd = new FormData();
+            fd.append('file', file);
+            const res = await apiFetch(`/api/transit/${order.id}/upload`, { method: 'POST', body: fd });
+            if (!res.ok) throw new Error(await res.text());
+            const j = await res.json();
+            setPaymentForm(prev => ({ ...prev, files: [...(prev.files||[]), j.path] }));
+            loadOrders();
+          } catch(e) { alert('Error subiendo archivo: ' + e.message); }
+          finally { setFileUploading(false); e.target.value = ''; }
+        };
+
+        const deleteFile = async (path) => {
+          if (!window.confirm('¿Eliminar este archivo?')) return;
+          const res = await apiFetch(`/api/transit/${order.id}/file`, {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+          });
+          if (res.ok) {
+            setPaymentForm(prev => ({ ...prev, files: (prev.files||[]).filter(f => f !== path) }));
+            loadOrders();
+          }
+        };
+
+        const getSignedUrl = async (path) => {
+          const res = await apiFetch(`/api/transit/${order.id}/signed-url?path=${encodeURIComponent(path)}`);
+          const j = await res.json();
+          if (j.url) window.open(j.url, '_blank');
+          else alert('No se pudo obtener la URL del archivo');
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+            onClick={e => { if (e.target === e.currentTarget) setPaymentModal(null); }}>
+            <div className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-gray-800 flex items-start justify-between">
+                <div>
+                  <h3 className="text-base font-semibold text-white">💰 Pagos — {order.ref}</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">{order.supplier} · Pedido {order.order_date}</p>
+                  {savedRate && (
+                    <p className="text-xs text-gray-600 mt-0.5">
+                      Tipo de cambio al pedir: <span className="text-amber-500 font-semibold">1 EUR = {savedRate.toFixed(4)} USD</span>
+                      {currentRate && Math.abs(currentRate - savedRate) / savedRate > 0.01 && (
+                        <span className="ml-2 text-gray-500">(actual: {currentRate.toFixed(4)})</span>
+                      )}
+                    </p>
+                  )}
+                </div>
+                <button onClick={() => setPaymentModal(null)} className="text-gray-500 hover:text-white text-xl leading-none ml-2">×</button>
+              </div>
+
+              {/* Resumen de totales */}
+              <div className={`px-6 py-3 bg-gray-800/40 border-b border-gray-800 grid gap-4 text-center ${totalAbono > 0 ? 'grid-cols-4' : 'grid-cols-3'}`}>
+                <div>
+                  <p className="text-xs text-gray-500 mb-0.5">Valor pedido</p>
+                  <p className="text-sm font-semibold text-white">{orderValue > 0 ? `${cur} ${num(orderValue,0)}` : '—'}</p>
+                  {orderValue === 0 && <p className="text-xs text-gray-600 mt-0.5">Edita el pedido para añadir precios</p>}
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 mb-0.5">Pagado</p>
+                  <p className="text-sm font-semibold text-amber-300">{cur} {num(totalPaid - totalAbono, 0)}</p>
+                </div>
+                {totalAbono > 0 && (
+                  <div>
+                    <p className="text-xs text-emerald-600 mb-0.5">↩️ Abonos a favor</p>
+                    <p className="text-sm font-semibold text-emerald-400">+ {cur} {num(totalAbono, 0)}</p>
+                  </div>
+                )}
+                <div>
+                  <p className="text-xs text-gray-500 mb-0.5">Pendiente</p>
+                  <p className={`text-sm font-semibold ${pending === null ? 'text-gray-600' : pending > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                    {pending === null ? '—' : `${cur} ${num(pending,0)}`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="px-6 py-4 overflow-y-auto flex-1 space-y-4">
+
+                {/* Moneda */}
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-gray-400 shrink-0">Moneda</span>
+                  <div className="flex gap-2">
+                    {['USD','EUR'].map(c => (
+                      <button key={c} onClick={() => setPaymentForm(prev => ({...prev, currency: c}))}
+                        className={`px-3 py-1 rounded-lg text-xs border transition-colors ${cur===c ? 'bg-amber-700 border-amber-600 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'}`}>
+                        {c}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Lista de pagos */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-gray-400 font-medium">Pagos y abonos</span>
+                    <div className="flex gap-1.5">
+                      {['Depósito','Saldo','Otro'].map(label => (
+                        <button key={label} onClick={() => addPayment(label)}
+                          className="px-2.5 py-1 rounded-lg text-xs border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:border-amber-600 hover:text-amber-400">
+                          + {label}
+                        </button>
+                      ))}
+                      <button onClick={() => addPayment('Abono')}
+                        className="px-2.5 py-1 rounded-lg text-xs border transition-colors bg-emerald-900/30 border-emerald-700/50 text-emerald-400 hover:bg-emerald-900/60">
+                        ↩️ Abono
+                      </button>
+                    </div>
+                  </div>
+
+                  {(pf.payments||[]).length === 0 ? (
+                    <div className="text-center py-6 text-gray-600 text-xs border border-dashed border-gray-700 rounded-xl">
+                      Sin pagos registrados · pulsa "Añadir pago"
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {/* Cabecera */}
+                      <div className="grid grid-cols-[1fr_120px_120px_24px] gap-2 px-2">
+                        <span className="text-xs text-gray-600">Descripción</span>
+                        <span className="text-xs text-gray-600 text-right">Importe ({cur})</span>
+                        <span className="text-xs text-gray-600">Fecha</span>
+                        <span></span>
+                      </div>
+                      {(pf.payments||[]).map((p, i) => {
+                        const isAbono = (p.description||'').toLowerCase() === 'abono';
+                        return (
+                        <div key={p.id} className={`rounded-lg px-2 py-2 space-y-1.5 ${isAbono ? 'bg-emerald-900/20 border border-emerald-800/40' : 'bg-gray-800/50'}`}>
+                          <div className="grid grid-cols-[1fr_120px_120px_24px] gap-2 items-center">
+                            {isAbono && <span className="absolute text-xs text-emerald-500 pointer-events-none select-none" style={{marginLeft:'6px',marginTop:'2px'}}>↩️</span>}
+                            <input type="text" value={p.description}
+                              onChange={e => updatePayment(p.id, 'description', e.target.value)}
+                              placeholder={i===0 ? 'Depósito 30%' : i===1 ? 'Saldo' : 'Descripción'}
+                              className={`bg-gray-900 border rounded px-2 py-1 text-xs focus:outline-none ${isAbono ? 'border-emerald-700/50 text-emerald-300 focus:border-emerald-500' : 'border-gray-700 text-white focus:border-amber-500'}`} />
+                            <div className="relative">
+                              {isAbono && <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-emerald-400 pointer-events-none">+</span>}
+                              <input type="number" min="0" step="0.01" value={p.amount}
+                                onChange={e => updatePayment(p.id, 'amount', e.target.value)}
+                                placeholder="0.00"
+                                className={`w-full bg-gray-900 border rounded px-2 py-1 text-xs text-right font-semibold focus:outline-none ${isAbono ? 'border-emerald-700/50 text-emerald-300 focus:border-emerald-500 pl-5' : 'border-gray-700 text-amber-200 focus:border-amber-500'}`} />
+                            </div>
+                            <input type="date" value={p.date}
+                              onChange={e => updatePayment(p.id, 'date', e.target.value)}
+                              className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-amber-500" />
+                            <button onClick={() => removePayment(p.id)}
+                              className="text-gray-600 hover:text-red-400 transition-colors text-sm leading-none text-center">×</button>
+                          </div>
+                          <input type="text" value={p.notes||''}
+                            onChange={e => updatePayment(p.id, 'notes', e.target.value)}
+                            placeholder="Nota (banco, referencia, observación...)"
+                            className="w-full bg-gray-900/60 border border-gray-700/50 rounded px-2 py-1 text-xs text-gray-400 placeholder-gray-600 focus:outline-none focus:border-gray-600" />
+                        </div>
+                      )})}
+                      {/* Total pagos — separar abonos */}
+                      {(() => {
+                        const pmtsOnly  = (pf.payments||[]).filter(p => (p.description||'').toLowerCase() !== 'abono');
+                        const abonos    = (pf.payments||[]).filter(p => (p.description||'').toLowerCase() === 'abono');
+                        const sumPmts   = pmtsOnly.reduce((a,p)=>a+(parseFloat(p.amount)||0),0);
+                        const sumAbonos = abonos.reduce((a,p)=>a+(parseFloat(p.amount)||0),0);
+                        return (
+                          <div className="flex flex-col items-end gap-0.5 px-2 pt-1 border-t border-gray-700/50">
+                            {sumAbonos > 0 && <div className="flex gap-3"><span className="text-xs text-gray-500">Abonos a favor:</span><span className="text-xs font-semibold text-emerald-400">+ {cur} {sumAbonos.toLocaleString('es-ES',{minimumFractionDigits:2})}</span></div>}
+                            <div className="flex gap-3"><span className="text-xs text-gray-500">{sumAbonos>0?'Pagos salientes:':'Total pagado:'}</span><span className="text-xs font-semibold text-amber-300">{cur} {sumPmts.toLocaleString('es-ES',{minimumFractionDigits:2})}</span></div>
+                            {sumAbonos > 0 && <div className="flex gap-3 pt-0.5 border-t border-gray-700/30"><span className="text-xs text-gray-400 font-medium">Neto pagado:</span><span className="text-xs font-bold text-emerald-400">{cur} {(sumPmts+sumAbonos).toLocaleString('es-ES',{minimumFractionDigits:2})}</span></div>}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+
+                {/* Notas generales del pedido */}
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Notas generales del pedido</label>
+                  <textarea rows="2" value={pf.notes} onChange={e => setPaymentForm(prev => ({...prev, notes: e.target.value}))}
+                    placeholder="Observaciones generales del pedido, condiciones acordadas..."
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-gray-500 resize-none" />
+                </div>
+
+                {/* Archivos */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-gray-400 font-medium">📎 Documentos adjuntos</span>
+                    <label className={`px-3 py-1 rounded-lg text-xs cursor-pointer transition-colors ${fileUploading ? 'bg-gray-700 text-gray-500' : 'bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 hover:text-white'}`}>
+                      {fileUploading ? '⏳ Subiendo...' : '+ Subir archivo'}
+                      <input type="file" accept=".pdf,.xlsx,.xls,.csv" className="hidden" onChange={uploadFile} disabled={fileUploading} />
+                    </label>
+                  </div>
+                  {(pf.files||[]).length === 0 ? (
+                    <p className="text-xs text-gray-600 italic">Sin documentos adjuntos</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {(pf.files||[]).map(path => {
+                        const name = path.split('/').pop();
+                        const isPdf = name.endsWith('.pdf');
+                        return (
+                          <div key={path} className="flex items-center gap-2 bg-gray-800/60 rounded-lg px-3 py-2">
+                            <span className="text-lg">{isPdf ? '📄' : '📊'}</span>
+                            <span className="text-xs text-gray-300 flex-1 truncate">{name}</span>
+                            <button onClick={() => getSignedUrl(path)}
+                              className="text-xs text-blue-400 hover:text-blue-300 px-2 py-0.5 rounded hover:bg-blue-900/20 transition-colors">Descargar</button>
+                            <button onClick={() => deleteFile(path)}
+                              className="text-gray-600 hover:text-red-400 transition-colors text-sm leading-none">×</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 border-t border-gray-800 flex gap-3 justify-end">
+                <button onClick={() => setPaymentModal(null)}
+                  className="px-4 py-2 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700">
+                  Cancelar
+                </button>
+                {orderValue > 0 && totalPaid > orderValue && (
+                  <span className="text-xs text-red-400 self-center">⚠️ Total pagado supera el valor del pedido</span>
+                )}
+                <button onClick={savePayment}
+                  disabled={paymentSaving || (orderValue > 0 && totalPaid > orderValue)}
+                  className="px-4 py-2 rounded-lg text-sm bg-amber-700 hover:bg-amber-600 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
+                  {paymentSaving ? 'Guardando...' : '💾 Guardar'}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   PAGOS — panel de seguimiento de pagos de pedidos en tránsito
+══════════════════════════════════════════════════════════════ */
+function Payments() {
+  const { data: transitData, loading } = useApi('/api/transit');
+  const { data: ratesData } = useApi('/api/exchange-rates');
+  const rates = ratesData;
+
+  const activeOrders = useMemo(() =>
+    (transitData?.orders || []).filter(o => (o.status || 'active') === 'active'),
+  [transitData]);
+
+  // ── Derivar datos de pagos ───────────────────────────────────────────────
+  const stats = useMemo(() => {
+    if (!activeOrders.length) return null;
+    const today = new Date().toISOString().slice(0,7);
+    const soon30 = new Date(Date.now()+30*24*3600*1000).toISOString().slice(0,7);
+
+    let totalPaid = 0, totalPending = 0, totalOrderVal = 0;
+    let ordersNone = 0, ordersPartial = 0, ordersComplete = 0;
+    let urgentPending = 0;
+    // Desglose por fábrica
+    const byFactory = {};
+    // Historial de pagos (todos los pagos individuales)
+    const allPayments = [];
+    // Para ratio depósito vs saldo vs abono
+    let depositTotal = 0, balanceTotal = 0, otherTotal = 0, abonoTotal = 0;
+
+    activeOrders.forEach(order => {
+      const pmts     = order.payments || [];
+      const orderVal = (order.lines||[]).reduce((a,l) => a+(parseFloat(l.qty)||0)*(parseFloat(l.price)||0), 0);
+      const paid     = pmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+      const pending  = orderVal > 0 ? Math.max(0, orderVal - paid) : 0;
+
+      totalOrderVal += orderVal;
+      totalPaid     += paid;
+      totalPending  += pending;
+
+      if (pmts.length === 0) ordersNone++;
+      else if (orderVal > 0 && paid >= orderVal) ordersComplete++;
+      else ordersPartial++;
+
+      if (pending > 0 && order.expected_arrival && order.expected_arrival <= soon30 && order.expected_arrival >= today)
+        urgentPending++;
+
+      // Fábrica
+      const fac = order.supplier || 'Sin fábrica';
+      if (!byFactory[fac]) byFactory[fac] = { paid:0, orderVal:0, orderCount:0, pendingOrders:0 };
+      byFactory[fac].paid      += paid;
+      byFactory[fac].orderVal  += orderVal;
+      byFactory[fac].orderCount++;
+      if (pending > 0) byFactory[fac].pendingOrders++;
+
+      // Historial
+      pmts.forEach(p => {
+        allPayments.push({
+          ...p,
+          orderRef:  order.ref,
+          supplier:  order.supplier || '—',
+          currency:  order.currency || 'USD',
+        });
+        const desc = (p.description || '').toLowerCase();
+        const amt  = parseFloat(p.amount) || 0;
+        if (desc === 'abono') abonoTotal += amt;
+        else if (desc.includes('dep')) depositTotal += amt;
+        else if (desc.includes('saldo') || desc.includes('balance')) balanceTotal += amt;
+        else otherTotal += amt;
+      });
+    });
+
+    // Sort historial by date desc
+    allPayments.sort((a,b) => (b.date||'').localeCompare(a.date||''));
+
+    // Sort factories by orderVal desc
+    const factoryList = Object.entries(byFactory)
+      .map(([name, v]) => ({ name, ...v }))
+      .sort((a,b) => b.orderVal - a.orderVal);
+
+    // Upcoming: orders with pending balance, sorted by arrival
+    const upcoming = activeOrders
+      .filter(o => {
+        const paid = (o.payments||[]).reduce((a,p)=>a+(parseFloat(p.amount)||0),0);
+        const val  = (o.lines||[]).reduce((a,l)=>a+(parseFloat(l.qty)||0)*(parseFloat(l.price)||0),0);
+        return val > 0 && paid < val;
+      })
+      .map(o => {
+        const paid = (o.payments||[]).reduce((a,p)=>a+(parseFloat(p.amount)||0),0);
+        const val  = (o.lines||[]).reduce((a,l)=>a+(parseFloat(l.qty)||0)*(parseFloat(l.price)||0),0);
+        return { ...o, paid, orderVal: val, pending: Math.max(0, val - paid) };
+      })
+      .sort((a,b) => {
+        if (!a.expected_arrival && !b.expected_arrival) return 0;
+        if (!a.expected_arrival) return 1;
+        if (!b.expected_arrival) return -1;
+        return a.expected_arrival.localeCompare(b.expected_arrival);
+      });
+
+    return {
+      totalPaid, totalPending, totalOrderVal, urgentPending,
+      ordersNone, ordersPartial, ordersComplete,
+      factoryList, allPayments, upcoming,
+      depositTotal, balanceTotal, otherTotal, abonoTotal,
+      pctPaid: totalOrderVal > 0 ? Math.round((totalPaid / totalOrderVal)*100) : 0,
+    };
+  }, [activeOrders]);
+
+  if (loading) return <div className="space-y-4">{[1,2,3].map(i=><Sk key={i} h="h-24"/>)}</div>;
+  if (!stats) return (
+    <div className="text-center py-24 text-gray-600">
+      <p className="text-5xl mb-4">💰</p>
+      <p className="text-sm">No hay pedidos en tránsito activos.</p>
+    </div>
+  );
+
+  const today = new Date().toISOString().slice(0,7);
+  const soon30 = new Date(Date.now()+30*24*3600*1000).toISOString().slice(0,7);
+
+  const urgencyCls = (arrival) => {
+    if (!arrival) return 'text-gray-500';
+    if (arrival < today) return 'text-red-400 font-semibold';
+    if (arrival <= soon30) return 'text-orange-400 font-semibold';
+    return 'text-gray-400';
+  };
+
+  return (
+    <div className="space-y-5 fade">
+
+      {/* ── KPIs ─────────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className={`bg-gray-900 border rounded-xl px-4 py-3 ${stats.urgentPending > 0 ? 'border-red-800/50' : 'border-gray-800'}`}>
+          <p className="text-xs text-gray-500 mb-1">Pendiente de pago</p>
+          <p className={`text-2xl font-bold ${stats.totalPending > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+            ${num(stats.totalPending, 0)}
+          </p>
+          {stats.urgentPending > 0 && (
+            <p className="text-xs text-red-400 mt-1 animate-pulse">⚠️ {stats.urgentPending} llegan pronto</p>
+          )}
+        </div>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3">
+          <p className="text-xs text-gray-500 mb-1">Total pagado</p>
+          <p className="text-2xl font-bold text-emerald-400">${num(stats.totalPaid, 0)}</p>
+          <p className="text-xs text-gray-600 mt-1">de ${num(stats.totalOrderVal,0)} total</p>
+        </div>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3">
+          <p className="text-xs text-gray-500 mb-2">Estado de pedidos</p>
+          <div className="flex gap-3 text-xs">
+            <span className="text-gray-400">⬜ Sin pago <strong className="text-white">{stats.ordersNone}</strong></span>
+            <span className="text-amber-400">🟡 Parcial <strong className="text-white">{stats.ordersPartial}</strong></span>
+            <span className="text-emerald-400">✅ Completo <strong className="text-white">{stats.ordersComplete}</strong></span>
+          </div>
+        </div>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3">
+          <p className="text-xs text-gray-500 mb-1">Progreso global</p>
+          <p className="text-2xl font-bold text-white">{stats.pctPaid}%</p>
+          <div className="mt-2 h-2 bg-gray-800 rounded-full overflow-hidden">
+            <div className={`h-full rounded-full transition-all ${stats.pctPaid>=100?'bg-emerald-500':stats.pctPaid>0?'bg-amber-500':'bg-gray-700'}`}
+              style={{width:`${stats.pctPaid}%`}} />
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+
+        {/* ── Desglose por fábrica ────────────────────────────────────── */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800">
+            <h3 className="text-sm font-semibold text-gray-300">🏭 Desglose por fábrica</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-800 text-gray-500 text-left">
+                  <th className="px-4 py-2">Fábrica</th>
+                  <th className="px-4 py-2 text-right">Pedidos</th>
+                  <th className="px-4 py-2 text-right">Valor total</th>
+                  <th className="px-4 py-2 text-right">Pagado</th>
+                  <th className="px-4 py-2 text-right">Pendiente</th>
+                  <th className="px-4 py-2 text-right">%</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {stats.factoryList.map(f => {
+                  const pct = f.orderVal > 0 ? Math.round((f.paid/f.orderVal)*100) : 0;
+                  const pending = Math.max(0, f.orderVal - f.paid);
+                  return (
+                    <tr key={f.name} className="hover:bg-gray-800/30 transition-colors">
+                      <td className="px-4 py-2.5 text-gray-200 font-medium">{f.name}</td>
+                      <td className="px-4 py-2.5 text-right text-gray-400">{f.orderCount}</td>
+                      <td className="px-4 py-2.5 text-right text-gray-300">${num(f.orderVal,0)}</td>
+                      <td className="px-4 py-2.5 text-right text-emerald-400">${num(f.paid,0)}</td>
+                      <td className={`px-4 py-2.5 text-right font-semibold ${pending>0?'text-amber-400':'text-emerald-400'}`}>
+                        {pending>0 ? `$${num(pending,0)}` : '✓'}
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <div className="flex items-center gap-2 justify-end">
+                          <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${pct>=100?'bg-emerald-500':pct>0?'bg-amber-500':'bg-gray-700'}`}
+                              style={{width:`${pct}%`}} />
+                          </div>
+                          <span className={`font-semibold ${pct>=100?'text-emerald-400':pct>0?'text-amber-400':'text-gray-600'}`}>{pct}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* ── Ratio depósito vs saldo ─────────────────────────────────── */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h3 className="text-sm font-semibold text-gray-300 mb-4">📊 Distribución de pagos</h3>
+          {stats.totalPaid === 0 ? (
+            <p className="text-xs text-gray-600 text-center py-8">Sin pagos registrados aún</p>
+          ) : (() => {
+            const total = stats.depositTotal + stats.balanceTotal + stats.otherTotal + stats.abonoTotal || 1;
+            const items = [
+              { label: 'Depósito',         value: stats.depositTotal, color: 'bg-indigo-500',  textColor: 'text-indigo-400' },
+              { label: 'Saldo',            value: stats.balanceTotal, color: 'bg-blue-500',    textColor: 'text-blue-400' },
+              { label: '↩️ Abono (a favor)', value: stats.abonoTotal,  color: 'bg-emerald-500', textColor: 'text-emerald-400' },
+              { label: 'Otro',             value: stats.otherTotal,   color: 'bg-amber-500',   textColor: 'text-amber-400' },
+            ].filter(i => i.value > 0);
+            return (
+              <div className="space-y-4">
+                {/* Stacked bar */}
+                <div className="h-6 rounded-full overflow-hidden flex">
+                  {items.map(i => (
+                    <div key={i.label} className={`${i.color} transition-all`}
+                      style={{width:`${(i.value/total)*100}%`}}
+                      title={`${i.label}: $${num(i.value,0)}`} />
+                  ))}
+                </div>
+                {/* Legend */}
+                <div className="space-y-2">
+                  {items.map(i => {
+                    const pct = Math.round((i.value/total)*100);
+                    return (
+                      <div key={i.label} className="flex items-center gap-3">
+                        <div className={`w-3 h-3 rounded-sm shrink-0 ${i.color}`} />
+                        <span className="text-xs text-gray-400 flex-1">{i.label}</span>
+                        <span className={`text-sm font-bold ${i.textColor}`}>${num(i.value,0)}</span>
+                        <span className="text-xs text-gray-500 w-10 text-right">{pct}%</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Insight */}
+                {(stats.depositTotal > 0 || stats.balanceTotal > 0 || stats.abonoTotal > 0) && (
+                  <div className="text-xs text-gray-500 border-t border-gray-800 pt-3 space-y-1">
+                    {stats.depositTotal > 0 && stats.balanceTotal > 0 && (
+                      <p>Pagas de media el <strong className="text-indigo-400">{Math.round((stats.depositTotal/(stats.depositTotal+stats.balanceTotal))*100)}% como depósito</strong> y el <strong className="text-blue-400">{Math.round((stats.balanceTotal/(stats.depositTotal+stats.balanceTotal))*100)}% como saldo</strong>.</p>
+                    )}
+                    {stats.abonoTotal > 0 && (
+                      <p>Has recibido <strong className="text-emerald-400">${num(stats.abonoTotal,0)} en abonos</strong> de proveedores ({Math.round((stats.abonoTotal/total)*100)}% del total movido).</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      </div>
+
+      {/* ── Calendario de vencimientos ───────────────────────────────── */}
+      {stats.upcoming.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-300">📅 Saldos pendientes por fecha de llegada</h3>
+            <span className="text-xs text-gray-500">{stats.upcoming.length} pedido{stats.upcoming.length!==1?'s':''}</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-800 text-gray-500 text-left">
+                  <th className="px-4 py-2">Pedido</th>
+                  <th className="px-4 py-2">Fábrica</th>
+                  <th className="px-4 py-2 text-center">Llegada est.</th>
+                  <th className="px-4 py-2 text-right">Valor pedido</th>
+                  <th className="px-4 py-2 text-right">Pagado</th>
+                  <th className="px-4 py-2 text-right">Pendiente</th>
+                  <th className="px-4 py-2 text-center">% Pago</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {stats.upcoming.map(o => {
+                  const pct = o.orderVal > 0 ? Math.round((o.paid/o.orderVal)*100) : 0;
+                  const isUrgent = o.expected_arrival && o.expected_arrival <= soon30 && o.expected_arrival >= today;
+                  const isPast   = o.expected_arrival && o.expected_arrival < today;
+                  return (
+                    <tr key={o.id} className={`hover:bg-gray-800/30 transition-colors ${isUrgent||isPast ? 'bg-red-950/20' : ''}`}>
+                      <td className="px-4 py-2.5 font-semibold text-white">{o.ref}</td>
+                      <td className="px-4 py-2.5 text-gray-400">{o.supplier||'—'}</td>
+                      <td className="px-4 py-2.5 text-center">
+                        {o.expected_arrival
+                          ? <span className={urgencyCls(o.expected_arrival)}>
+                              {isPast ? '🔴' : isUrgent ? '🟠' : '📅'} {o.expected_arrival}
+                            </span>
+                          : <span className="text-gray-600">Sin fecha</span>}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-gray-300">${num(o.orderVal,0)}</td>
+                      <td className="px-4 py-2.5 text-right text-emerald-400">{o.paid > 0 ? `$${num(o.paid,0)}` : '—'}</td>
+                      <td className={`px-4 py-2.5 text-right font-bold ${isUrgent||isPast ? 'text-red-400' : 'text-amber-400'}`}>
+                        ${num(o.pending,0)}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center gap-2 justify-center">
+                          <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${pct>=100?'bg-emerald-500':pct>0?'bg-amber-500':'bg-gray-700'}`}
+                              style={{width:`${pct}%`}} />
+                          </div>
+                          <span className="text-gray-500 w-8">{pct}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Historial de pagos ──────────────────────────────────────── */}
+      {stats.allPayments.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-300">🕐 Historial cronológico de pagos</h3>
+            <span className="text-xs text-gray-500">{stats.allPayments.length} pago{stats.allPayments.length!==1?'s':''} · Total ${num(stats.totalPaid,0)}</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-800 text-gray-500 text-left">
+                  <th className="px-4 py-2">Fecha</th>
+                  <th className="px-4 py-2">Pedido</th>
+                  <th className="px-4 py-2">Fábrica</th>
+                  <th className="px-4 py-2">Descripción</th>
+                  <th className="px-4 py-2 text-right">Importe</th>
+                  <th className="px-4 py-2">Notas</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/50">
+                {stats.allPayments.map((p, i) => {
+                  const desc = (p.description||'').toLowerCase();
+                  const isAbono = desc === 'abono';
+                  const typeColor = isAbono ? 'text-emerald-400' : desc.includes('dep') ? 'text-indigo-400' : desc.includes('saldo')||desc.includes('balance') ? 'text-blue-400' : 'text-amber-400';
+                  return (
+                    <tr key={p.id||i} className={`hover:bg-gray-800/30 transition-colors ${isAbono ? 'bg-emerald-950/20' : ''}`}>
+                      <td className="px-4 py-2.5 text-gray-400 whitespace-nowrap">{p.date || '—'}</td>
+                      <td className="px-4 py-2.5 font-semibold text-white">{p.orderRef}</td>
+                      <td className="px-4 py-2.5 text-gray-400">{p.supplier}</td>
+                      <td className={`px-4 py-2.5 font-medium ${typeColor}`}>{isAbono ? '↩️ ' : ''}{p.description || '—'}</td>
+                      <td className={`px-4 py-2.5 text-right font-bold whitespace-nowrap ${isAbono ? 'text-emerald-400' : 'text-white'}`}>
+                        {isAbono ? '+ ' : ''}{p.currency} {num(parseFloat(p.amount)||0, 0)}
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-500 max-w-xs truncate" title={p.notes}>{p.notes || ''}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   HISTORIAL — pedidos archivados (recibidos)
+══════════════════════════════════════════════════════════════ */
+function History() {
+  const { data: transitData, loading, refresh } = useApi('/api/transit');
+  const { data: ratesData } = useApi('/api/exchange-rates');
+  const rates = ratesData;
+  const [search, setSearch] = useState('');
+  const [expanded, setExpanded] = useState({});
+  const [unarchiving, setUnarchiving] = useState(null);
+  const [sortBy, setSortBy] = useState('arrival'); // 'arrival' | 'order_date' | 'created'
+
+  const unarchiveOrder = async (order) => {
+    if (!window.confirm(`¿Devolver "${order.ref}" a En tránsito?`)) return;
+    setUnarchiving(order.id);
+    try {
+      const res = await apiFetch(`/api/transit/${order.id}/unarchive`, { method: 'PATCH' });
+      if (!res.ok) throw new Error(await res.text());
+      refresh();
+    } catch(e) { alert('Error: ' + e.message); }
+    finally { setUnarchiving(null); }
+  };
+
+  const archived = useMemo(() => {
+    const all = (transitData?.orders || []).filter(o => o.status === 'archived');
+    return all.sort((a, b) => {
+      let da, db;
+      if (sortBy === 'arrival') {
+        da = a.actual_arrival || a.expected_arrival || '';
+        db = b.actual_arrival || b.expected_arrival || '';
+      } else if (sortBy === 'order_date') {
+        da = a.order_date || '';
+        db = b.order_date || '';
+      } else { // created_at
+        da = a.created_at || '';
+        db = b.created_at || '';
+      }
+      return db.localeCompare(da); // desc (más reciente primero)
+    });
+  }, [transitData, sortBy]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return archived;
+    const q = search.toLowerCase();
+    return archived.filter(o =>
+      (o.ref||'').toLowerCase().includes(q) ||
+      (o.supplier||'').toLowerCase().includes(q)
+    );
+  }, [archived, search]);
+
+  const toggle = (id) => setExpanded(prev => ({...prev, [id]: !prev[id]}));
+
+  if (loading) return <div className="text-gray-500 text-sm p-8">Cargando historial...</div>;
+
+  return (
+    <div className="space-y-4 max-w-5xl mx-auto">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-lg font-bold text-white">📋 Historial de pedidos</h2>
+          <p className="text-xs text-gray-500 mt-0.5">{archived.length} pedido{archived.length!==1?'s':''} archivado{archived.length!==1?'s':''}</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Ordenar */}
+          <div className="flex items-center gap-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg px-2 py-1">
+            <span className="text-xs text-gray-500 shrink-0">Ordenar:</span>
+            {[
+              { key: 'arrival',    label: '📦 Llegada real' },
+              { key: 'order_date', label: '📅 Fecha pedido' },
+              { key: 'created',    label: '🕐 Creación' },
+            ].map(opt => (
+              <button key={opt.key} onClick={() => setSortBy(opt.key)}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${sortBy === opt.key ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <input
+            value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar referencia o proveedor..."
+            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-gray-500 w-56" />
+        </div>
+      </div>
+
+      {filtered.length === 0 && (
+        <div className="text-center py-16 text-gray-600">
+          <p className="text-4xl mb-3">📦</p>
+          <p className="text-sm">{search ? 'Sin resultados para esa búsqueda' : 'Aún no hay pedidos archivados'}</p>
+          <p className="text-xs mt-1">Archiva un pedido en tránsito cuando lo recibas para que aparezca aquí</p>
+        </div>
+      )}
+
+      {filtered.map(order => {
+        const pmts       = order.payments || [];
+        const cur        = order.currency || 'USD';
+        const abonoSum   = pmts.filter(p => (p.description||'').toLowerCase() === 'abono').reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+        const outgoing   = pmts.filter(p => (p.description||'').toLowerCase() !== 'abono').reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+        const totalPaid  = outgoing + abonoSum;
+        const orderVal   = (order.lines||[]).reduce((a,l) => a+(parseFloat(l.qty)||0)*(parseFloat(l.price)||0), 0);
+        const pending    = orderVal > 0 ? Math.max(0, orderVal - totalPaid) : 0;
+        const pct        = orderVal > 0 ? Math.min(100, Math.round((totalPaid / orderVal) * 100)) : 0;
+        const isOpen     = !!expanded[order.id];
+
+        // Delay calculation
+        let delayEl = null;
+        if (order.actual_arrival && order.expected_arrival) {
+          const d = Math.round((new Date(order.actual_arrival+'-01') - new Date(order.expected_arrival+'-01')) / (30*24*3600*1000));
+          delayEl = d === 0
+            ? <span className="text-gray-500">· En plazo</span>
+            : d < 0
+              ? <span className="text-emerald-400">· ⚡ {Math.abs(d)}m antes</span>
+              : <span className="text-red-400">· ⚠️ {d}m de retraso</span>;
+        }
+
+        return (
+          <div key={order.id} className="bg-gray-900 border border-gray-700/50 rounded-xl overflow-hidden">
+            {/* Card header */}
+            <div className="px-4 py-3 flex items-start gap-3 cursor-pointer hover:bg-gray-800/30 transition-colors"
+              onClick={() => toggle(order.id)}>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-bold text-white">{order.ref}</span>
+                  <span className="text-gray-400 text-xs">·</span>
+                  <span className="text-sm text-gray-300">{order.supplier}</span>
+                  {order.odoo_po && order.odoo_po.split(',').filter(Boolean).map(po => (
+                    <span key={po} className="px-2 py-0.5 rounded text-xs bg-emerald-900/30 border border-emerald-700/50 text-emerald-400">✅ {po.trim()}</span>
+                  ))}
+                  {(order.files||[]).length > 0 && (
+                    <span className="px-2 py-0.5 rounded text-xs bg-indigo-900/30 border border-indigo-700/40 text-indigo-400">📎 {(order.files||[]).length}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 mt-1 flex-wrap">
+                  <span className="text-xs text-gray-500">📅 Pedido: {order.order_date||'—'}</span>
+                  <span className="text-xs text-gray-500">🎯 Prevista: {order.expected_arrival||'—'}</span>
+                  {order.actual_arrival && (
+                    <span className="text-xs text-emerald-400 font-medium">✅ Llegó: {order.actual_arrival}</span>
+                  )}
+                  {delayEl && <span className="text-xs">{delayEl}</span>}
+                </div>
+                {/* Resumen financiero */}
+                <div className="flex items-center gap-3 mt-1 flex-wrap">
+                  {orderVal > 0 && <span className="text-xs text-gray-400">Valor: <span className="text-white font-semibold">{cur} {num(orderVal,0)}</span></span>}
+                  {outgoing > 0 && <span className="text-xs text-emerald-400">✅ Pagado: {cur} {num(outgoing,0)}</span>}
+                  {abonoSum > 0 && <span className="text-xs text-emerald-300">↩️ Abono: {cur} {num(abonoSum,0)}</span>}
+                  {pending > 0 && <span className="text-xs text-amber-400">⏳ Pendiente: {cur} {num(pending,0)}</span>}
+                  {pending === 0 && orderVal > 0 && <span className="text-xs text-emerald-500 font-semibold">· Pagado completo ✓</span>}
+                </div>
+                {/* Barra de progreso */}
+                {orderVal > 0 && (
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full transition-all duration-500 ${pct >= 100 ? 'bg-emerald-500' : pct > 0 ? 'bg-amber-500' : 'bg-gray-700'}`}
+                        style={{width:`${pct}%`}} />
+                    </div>
+                    <span className={`text-xs font-semibold ${pct >= 100 ? 'text-emerald-400' : pct > 0 ? 'text-amber-400' : 'text-gray-600'}`}>{pct}%</span>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-col items-end gap-2 shrink-0">
+                <span className="text-gray-600 text-sm">{isOpen ? '▲' : '▼'}</span>
+                <button
+                  onClick={e => { e.stopPropagation(); unarchiveOrder(order); }}
+                  disabled={unarchiving === order.id}
+                  className="px-2.5 py-1 rounded-lg text-xs bg-amber-900/30 border border-amber-700/50 text-amber-400 hover:bg-amber-900/60 disabled:opacity-50 transition-colors whitespace-nowrap">
+                  {unarchiving === order.id ? '...' : '↩️ Devolver a tránsito'}
+                </button>
+              </div>
+            </div>
+
+            {/* Detalle expandido */}
+            {isOpen && (
+              <div className="border-t border-gray-800 px-4 py-3 space-y-4">
+
+                {/* Líneas de productos */}
+                <div>
+                  <p className="text-xs text-gray-500 font-medium mb-2">📦 Productos</p>
+                  <div className="space-y-1">
+                    {(order.lines||[]).map(l => (
+                      <div key={l.id||l.product_id} className="flex items-center gap-3 text-xs py-1 border-b border-gray-800/50">
+                        <span className="flex-1 text-gray-300 truncate">{l.name||l.product_id}</span>
+                        <span className="text-gray-500 shrink-0">{num(l.qty_original||l.qty,0)} uds orig.</span>
+                        {l.qty !== l.qty_original && <span className="text-amber-400 shrink-0">{num(l.qty,0)} pend.</span>}
+                        {l.price > 0 && <span className="text-gray-400 shrink-0">{cur} {num(l.price,2)}/u</span>}
+                        {l.price > 0 && <span className="text-white font-semibold shrink-0">{cur} {num((l.qty_original||l.qty)*l.price,0)}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Pagos */}
+                {pmts.length > 0 && (
+                  <div>
+                    <p className="text-xs text-gray-500 font-medium mb-2">💳 Pagos</p>
+                    <div className="space-y-1">
+                      {pmts.map((p,i) => {
+                        const isAbono = (p.description||'').toLowerCase() === 'abono';
+                        return (
+                          <div key={p.id||i} className={`flex items-center gap-3 text-xs py-1 rounded px-2 ${isAbono ? 'bg-emerald-900/20 border border-emerald-800/30' : 'bg-gray-800/30'}`}>
+                            <span className="text-gray-500 shrink-0">{p.date||'—'}</span>
+                            <span className={`flex-1 ${isAbono ? 'text-emerald-300' : 'text-gray-300'}`}>{isAbono ? '↩️ ' : ''}{p.description||'—'}</span>
+                            <span className={`font-semibold shrink-0 ${isAbono ? 'text-emerald-400' : 'text-amber-300'}`}>{isAbono ? '+' : ''}{cur} {num(parseFloat(p.amount)||0,2)}</span>
+                            {p.notes && <span className="text-gray-600 truncate max-w-xs">{p.notes}</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Documentos */}
+                {(order.files||[]).length > 0 && (
+                  <div>
+                    <p className="text-xs text-gray-500 font-medium mb-2">📎 Documentos</p>
+                    <div className="flex flex-wrap gap-2">
+                      {(order.files||[]).map(path => {
+                        const name = path.split('/').pop();
+                        return (
+                          <span key={path} className="px-2 py-1 rounded text-xs bg-gray-800 border border-gray-700 text-gray-300">
+                            {name.endsWith('.pdf') ? '📄' : '📊'} {name}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Notas */}
+                {order.notes && (
+                  <div>
+                    <p className="text-xs text-gray-500 font-medium mb-1">📝 Notas</p>
+                    <p className="text-xs text-gray-400 bg-gray-800/40 rounded p-2">{order.notes}</p>
+                  </div>
+                )}
+
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2691,9 +3892,103 @@ function UrgentBadge() {
   );
 }
 
+/* ── Login screen ─────────────────────────────────────────────────────────── */
+function LoginScreen({ onLogin }) {
+  const [pw,  setPw]  = useState('');
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setLoading(true); setErr('');
+    try {
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw }),
+      });
+      const j = await r.json();
+      if (!r.ok) { setErr(j.detail || 'Error'); return; }
+      localStorage.setItem('auth_token', j.token);
+      localStorage.setItem('auth_role',  j.role);
+      onLogin(j.role);
+    } catch { setErr('No se pudo conectar al servidor'); }
+    finally  { setLoading(false); }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-950">
+      <div className="w-full max-w-sm mx-4">
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 rounded-2xl bg-indigo-600 flex items-center justify-center text-3xl mx-auto mb-4">🛒</div>
+          <h1 className="text-xl font-bold text-white">Odoo Purchasing</h1>
+          <p className="text-sm text-gray-500 mt-1">Introduce la contraseña para acceder</p>
+        </div>
+        <form onSubmit={submit} className="bg-gray-900 border border-gray-800 rounded-2xl p-6 flex flex-col gap-4">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1.5">Contraseña</label>
+            <input
+              type="password"
+              value={pw}
+              onChange={e => setPw(e.target.value)}
+              autoFocus
+              placeholder="••••••••"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          {err && <p className="text-red-400 text-xs text-center">{err}</p>}
+          <button
+            type="submit"
+            disabled={loading || !pw}
+            className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-white transition-colors">
+            {loading ? 'Verificando…' : 'Entrar'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function App() {
-  const [tab, setTab] = useState('dashboard');
+  const [tab,  setTab]  = useState('dashboard');
   const [dark, setDark] = useState(() => localStorage.getItem('theme') !== 'light');
+  const [role, setRole] = useState(() => localStorage.getItem('auth_role') || null);
+
+  // Check we have a token in storage; if not, treat as logged out
+  const [hasToken, setHasToken] = useState(() => !!localStorage.getItem('auth_token'));
+
+  // Arrival alerts banner
+  const [alerts,        setAlerts]        = useState(null);  // null = not loaded yet
+  const [alertDismissed, setAlertDismissed] = useState(false);
+  const [sendingEmail,  setSendingEmail]  = useState(false);
+  const [emailSent,     setEmailSent]     = useState(false);
+
+  useEffect(() => {
+    if (!hasToken) return;
+    apiFetch('/api/alerts/check')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setAlerts(d); })
+      .catch(() => {});
+  }, [hasToken]);
+
+  const sendAlertEmail = async () => {
+    setSendingEmail(true);
+    try {
+      const r = await apiFetch('/api/alerts/send-email', { method: 'POST' });
+      const j = await r.json();
+      if (r.ok) setEmailSent(true);
+      else alert(j.detail || 'Error enviando email');
+    } catch { alert('Error de conexión'); }
+    finally { setSendingEmail(false); }
+  };
+
+  const handleLogin = (r) => { setRole(r); setHasToken(true); };
+  const handleLogout = () => {
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_role');
+    setRole(null);
+    setHasToken(false);
+  };
 
   useEffect(() => {
     const html = document.documentElement;
@@ -2702,19 +3997,61 @@ function App() {
     localStorage.setItem('theme', dark ? 'dark' : 'light');
   }, [dark]);
 
+  // Show login if no token and APP_PASSWORD is configured on the server
+  // We detect this by checking: no token AND not a view-only link
+  if (!hasToken && !IS_READONLY) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
   const bg      = dark ? '#030712' : '#f1f5f9';
   const panelBg = dark ? '#0f172a' : '#ffffff';
 
   return (
+    <AuthCtx.Provider value={{ role: role || 'viewer', logout: handleLogout }}>
     <ThemeCtx.Provider value={dark}>
-    <ReadOnlyCtx.Provider value={IS_READONLY}>
+    <ReadOnlyCtx.Provider value={IS_READONLY || role === 'viewer'}>
     <div className="min-h-screen flex flex-col" style={{background: bg}}>
       {/* Read-only banner */}
-      {IS_READONLY && (
+      {(IS_READONLY || role === 'viewer') && (
         <div className="bg-amber-600/90 text-amber-950 text-xs font-semibold text-center py-1.5 px-4">
           👁️ Modo solo lectura — vista de consulta
         </div>
       )}
+
+      {/* Arrival alert banner */}
+      {alerts && alerts.count > 0 && !alertDismissed && (
+        <div className="bg-orange-500/15 border-b border-orange-500/30 px-4 py-2.5 flex items-center gap-3 flex-wrap">
+          <span className="text-lg shrink-0">🚢</span>
+          <p className="text-orange-300 text-sm font-medium flex-1 min-w-0">
+            <span className="font-bold text-orange-200">{alerts.count} pedido(s)</span> llegan en los próximos {alerts.days} días:&nbsp;
+            {alerts.orders.map((o, i) => (
+              <span key={o.id}>
+                <span className="text-white">{o.ref}</span>
+                <span className="text-orange-400/70 text-xs"> ({o.expected_arrival})</span>
+                {i < alerts.orders.length - 1 ? ', ' : ''}
+              </span>
+            ))}
+          </p>
+          <div className="flex items-center gap-2 shrink-0">
+            {!emailSent ? (
+              <button
+                onClick={sendAlertEmail}
+                disabled={sendingEmail}
+                className="px-3 py-1 bg-orange-500 hover:bg-orange-400 disabled:opacity-50 rounded-lg text-xs font-semibold text-white transition-colors">
+                {sendingEmail ? 'Enviando…' : '📧 Enviar email'}
+              </button>
+            ) : (
+              <span className="text-xs text-emerald-400 font-medium">✓ Email enviado</span>
+            )}
+            <button
+              onClick={() => setAlertDismissed(true)}
+              className="w-6 h-6 flex items-center justify-center rounded text-orange-400 hover:text-orange-200 hover:bg-orange-500/20 transition-colors text-base">
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="border-b border-gray-800 px-5 py-3 flex items-center justify-between sticky top-0 z-10"
         style={{background: panelBg}}>
@@ -2732,6 +4069,14 @@ function App() {
             className="w-8 h-8 rounded-lg flex items-center justify-center text-base transition-colors hover:bg-gray-800 text-gray-400 hover:text-gray-200">
             {dark ? '☀️' : '🌙'}
           </button>
+          {hasToken && !IS_READONLY && (
+            <button
+              onClick={handleLogout}
+              title="Cerrar sesión"
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-sm transition-colors hover:bg-gray-800 text-gray-500 hover:text-red-400">
+              🚪
+            </button>
+          )}
           <Status />
         </div>
       </header>
@@ -2754,10 +4099,13 @@ function App() {
         {tab==='stock'     && <StockAlerts />}
         {tab==='forecast'  && <Forecast />}
         {tab==='transit'   && <Transit />}
+        {tab==='payments'  && <Payments />}
+        {tab==='historial' && <History />}
       </main>
     </div>
     </ReadOnlyCtx.Provider>
     </ThemeCtx.Provider>
+    </AuthCtx.Provider>
   );
 }
 

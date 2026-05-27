@@ -1,0 +1,36 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-mock httpx
+
+      - name: Ejecutar tests
+        env:
+          ODOO_URL:      "http://fake-odoo.test"
+          ODOO_DB:       "fake_db"
+          ODOO_USERNAME: "test@test.com"
+          ODOO_PASSWORD: "fake_password"
+          SUPABASE_URL:  "http://fake-supabase.test"
+          SUPABASE_KEY:  "fake_key"
+        run: pytest tests/ -v --tb=short
