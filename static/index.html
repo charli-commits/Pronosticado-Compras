@@ -631,6 +631,8 @@ function Spark({ data, color='#6366f1', w=80, h=28 }) {
 function Forecast() {
   const { data, loading, error, refresh } = useApi('/api/forecast');
   const { data: transitData, refresh: refreshTransit } = useApi('/api/transit');
+  const { data: ratesData } = useApi('/api/exchange-rates');
+  const rates = ratesData;
   const dark = useTheme();
   const readOnly = useReadOnly();
   const transitQtyByProduct = useMemo(() => {
@@ -680,9 +682,13 @@ function Forecast() {
   });
 
   const openQuickAdd = async () => {
-    // Include ALL selected products — quantities can be filled inside the modal
-    const selectedProducts = filtered.filter(p => selectedPids.has(p.product_id));
-    if (selectedProducts.length === 0) return;
+    const selectedProducts = filtered.filter(p =>
+      selectedPids.has(p.product_id) && (parseFloat(quantities[p.product_id]) || 0) > 0
+    );
+    if (selectedProducts.length === 0) {
+      alert('Ningún producto seleccionado tiene unidades en "Cant. Compra". Introduce las cantidades primero.');
+      return;
+    }
     const firstVendor = selectedProducts[0].vendor || '';
     let existing = [];
     try {
@@ -696,7 +702,7 @@ function Forecast() {
     setQuickAddLines(selectedProducts.map(p => ({
       product_id: p.product_id,
       product_name: p.product_name,
-      qty: parseFloat(quantities[p.product_id]) || 0,
+      qty: parseFloat(quantities[p.product_id]),
       price: Math.round(((p.vendor_price || p.avg_price || 0) * eurToUsd) * 100) / 100,
     })));
     setQuickAddForm({ ref:'', supplier: firstVendor, order_date: new Date().toISOString().slice(0,10), expected_arrival:'', targetOrderId:'new' });
@@ -1209,7 +1215,7 @@ function Forecast() {
                 </>}
                 {/* Product lines */}
                 <div>
-                  <label className="text-xs text-gray-400 block mb-2">Productos y cantidades <span className="text-gray-600">(edita las unidades antes de guardar)</span></label>
+                  <label className="text-xs text-gray-400 block mb-2">Productos y cantidades</label>
                   <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                     {quickAddLines.map((line, i) => (
                       <div key={line.product_id} className="flex items-center gap-2 bg-gray-800/60 border border-gray-700/50 rounded-lg px-3 py-2">
